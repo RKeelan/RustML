@@ -1,110 +1,281 @@
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fmt::{Debug, Display, Formatter, Result};
+use std::hash::{Hash, Hasher};
+use std::ops::Add;
 
 use derivative::Derivative;
 use num_traits::Float;
 
 
-pub trait Flt: Float + Display + Debug {}
-impl<T: Float + Display + Debug> Flt for T {}
+pub trait Flt: Float + std::ops::AddAssign + Display + Debug {}
+impl<T: Float + std::ops::AddAssign + Display + Debug> Flt for T {}
+
+#[derive(Debug, Default)]
+struct BackPropCtx<'a, T> {
+    lhs: Option<&'a Tensor<'a, T>>,
+    rhs: Option<&'a Tensor<'a, T>>,
+}
 
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct Tensor<T> {
+pub struct Tensor<'a, T> {
     pub shape: Vec<usize>,
     pub data: Vec<T>,
+    pub grad: Option<RefCell<Vec<T>>>,
+    #[derivative(Debug="ignore")]
+    back_prop_fn: Option<fn(result: &Tensor<'a, T>, ctx: &BackPropCtx<'a, T>)>,
+    back_prop_ctx: Option<BackPropCtx<'a, T>>,
 }
 
-impl<T> Tensor<T> {
-    pub fn new(shape: Vec<usize>, data: Vec<T>) -> Tensor<T> {
-        assert_eq!(shape.iter().product::<usize>(), data.len());
-        Tensor {
-            shape,
-            data,
-        }
-    }
-
-    pub fn new_0d(data: T) -> Tensor<T> {
+// Constructors
+impl<'a, T: Flt> Tensor<'a, T> {
+    pub fn new_0d(data: T) -> Tensor<'a, T> {
         Tensor {
             shape: vec![1],
             data: vec![data],
+            grad: Some(RefCell::new(vec![T::zero(); 1])),
+            back_prop_fn: None,
+            back_prop_ctx: None,
         }
     }
 
-    pub fn new_1d(data: Vec<T>) -> Tensor<T> {
+    pub fn new_1d(data: Vec<T>) -> Tensor<'a, T> {
+        let length = data.len();
         Tensor {
             shape: vec![data.len()],
             data,
+            grad: Some(RefCell::new(vec![T::zero(); length])),
+            back_prop_fn: None,
+            back_prop_ctx: None,
         }
     }
 
-    pub fn new_2d(data: Vec<Vec<T>>) -> Tensor<T> {
+    pub fn new_2d(data: Vec<Vec<T>>) -> Tensor<'a, T> {
         // Check for jaggedness
         let row_len = data.iter().map(|v| v.len()).collect::<Vec<usize>>();
-        assert_eq!(row_len.iter().all(|v| v == &row_len[0]), true);
+        assert!(row_len.iter().all(|v| v == &row_len[0]), "Jagged matrix provided to new_2d");
 
+        let length = data.len();
         let shape = match row_len[0] {
             0 => vec![0, 0],
-            _ => data.iter().map(|v| v.len()).collect()
+            _ => vec![data.len(), row_len[0]]
         };
 
         Tensor {
             shape: shape,
             data: data.into_iter().flatten().collect(),
+            grad: Some(RefCell::new(vec![T::zero(); length])),
+            back_prop_fn: None,
+            back_prop_ctx: None,
         }
+    }
+    
+    pub fn new(shape: Vec<usize>, data: Vec<T>) -> Tensor<'a, T> {
+        let length = data.len();
+        assert_eq!(shape.iter().product::<usize>(), length);
+        Tensor {
+            shape,
+            data,
+            grad: Some(RefCell::new(vec![T::zero(); length])),
+            back_prop_fn: None,
+            back_prop_ctx: None,
+        }
+    }
+
+    pub fn zeros(shape: Vec<usize>) -> Tensor<'a, T> {
+        let data = vec![T::zero(); shape.iter().product()];
+        Tensor::new(shape, data)
+    }
+
+    pub fn ones(shape: Vec<usize>) -> Tensor<'a, T> {
+        let data = vec![T::one(); shape.iter().product()];
+        Tensor::new(shape, data)
     }
 }
 
-impl<T: Flt> Display for Tensor<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match self.shape.len() {
-            1 => { write!(f, "{:?}", self.data) }
+// Misc
+impl<'a, T: Flt> Tensor<'a, T> {
+    fn check_shape(&self, other: &Tensor<T>) -> bool {
+        // TODO Relax this constraint to allow broadcasting
+        self.shape == other.shape
+    }
+
+    fn print_vec_as_tensor(shape: &Vec<usize>, vec: &Vec<T>, f: &mut Formatter<'_>) -> Result {
+        match shape.len() {
+            1 => { writeln!(f, "{:?}", vec) }
             2 => {
-                let cols = self.shape[1];
-                let rows = self.shape[0];
-                write!(f, "Shape: {:?} ", self.shape)?;
+                let cols = shape[1];
+                let rows = shape[0];
+                write!(f, "Shape: {:?} ", shape)?;
                 for i in 0..rows {
-                    let row = &self.data[i * cols..(i + 1) * cols];
+                    let row = &vec[i * cols..(i + 1) * cols];
                     write!(f, "{:?}", row)?;
                 }
-                write!(f, "")
+                writeln!(f, "")
             }
             // TODO: I'd like to handle this more nicely, by printing the tensor in 2D blocks, the way PyTorch does
-            _ => { write!(f, "{:?}: {:?}", self.shape, self.data) }
+            _ => { writeln!(f, "{:?}: {:?}", shape, vec) }
+        }
+    }
+}
+impl<'a, T: Flt> Display for Tensor<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        writeln!(f, "Data:")?;
+        Tensor::print_vec_as_tensor(&self.shape, &self.data, f)?;
+        if let Some(grad) = &self.grad {
+            writeln!(f, "Grad:")?;
+            Tensor::print_vec_as_tensor(&self.shape, &grad.borrow(), f)?;
+        }
+        Ok(())
+    }
+}
+impl<'a, T> PartialEq for Tensor<'a, T> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+impl<'a, T> Eq for Tensor<'a, T> {}
+impl<'a, T> Hash for Tensor<'a, T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self, state);
+    }
+}
+
+// Autograd
+impl<'a, T: Flt> Tensor<'a, T> {
+    fn update_grad(grad: &mut Vec<T>, updates: &Vec<T>) {
+        for (g, u) in grad.iter_mut().zip(updates.iter()) {
+            *g += *u;
+        }
+    }
+
+    pub fn visit<'b>(topological_ordering: &mut Vec<&'b Tensor<'a, T>>, visited: &mut HashSet<&'b Tensor<'a, T>>, tensor: &'b Tensor<'a, T>) {
+        if !visited.contains(tensor) {
+            visited.insert(tensor);
+            if let Some(lhs) = tensor.back_prop_ctx.as_ref().map(|ctx| ctx.rhs.unwrap()) {
+                Tensor::visit(topological_ordering, visited, lhs);
+            }
+            if let Some(rhs) = tensor.back_prop_ctx.as_ref().map(|ctx| ctx.rhs.unwrap()) {
+                Tensor::visit(topological_ordering, visited, rhs);
+            }
+            topological_ordering.push(&tensor);
+        }
+    }
+    
+    pub fn bwd(&self) {
+        // Build a topological ordering of the graph
+        let mut topological_ordering = Vec::<&Tensor<'a, T>>::new();
+        let mut visited = HashSet::<&Tensor<'a, T>>::new();
+        Tensor::visit(&mut topological_ordering, &mut visited, &self);
+
+        self.grad.as_ref().as_mut().map(|ref_cell| ref_cell.borrow_mut().iter_mut().for_each(|x| *x = T::one()));
+        for tensor in topological_ordering.iter().rev() {
+            if let Some(ctx) = tensor.back_prop_ctx.as_ref() {
+                tensor.back_prop_fn.expect("Backpropagation function was None")(tensor, &ctx);
+            }
         }
     }
 }
 
+// Operators
+impl<'a, T: Flt> Tensor<'a, T> {
+    fn add_bwd(&self, ctx: &BackPropCtx<'a, T>) {
+        let updates = self.grad.as_ref().expect("Self gradient was None during add back propagation.").borrow();
+        let mut lhs_grad = ctx.lhs.expect("LHS Tensor was none during add back propagation")
+            .grad.as_ref().expect("LHS gradient was None during back propagation.").borrow_mut();
+        let mut rhs_grad = ctx.rhs.expect("RHS Tensor was none during add back propagation")
+            .grad.as_ref().expect("RHS gradient was None during back propagation.").borrow_mut();
+
+        Tensor::update_grad(&mut lhs_grad, &updates);
+        Tensor::update_grad(&mut rhs_grad, &updates);
+    }
+}
+impl<'a, T: Flt> Add<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
+    type Output = Tensor<'a, T>;
+    fn add(self, rhs: &'a Tensor<'a, T>) -> Tensor<'a, T> {
+        assert!(self.check_shape(rhs), "Cannot add tensors with different shapes ({:?} !+ {:?}",
+            self.shape, rhs.shape);
+        let res_data = self.data.iter().zip(rhs.data.iter()).map(|(&a, &b)| a + b).collect();
+        let mut res = Tensor::new(self.shape.clone(), res_data);
+        res.back_prop_fn = Some(Tensor::add_bwd);
+        res.back_prop_ctx = Some(BackPropCtx { lhs: Some(self), rhs: Some(rhs) });
+        res
+    }
+}
 
 #[cfg(test)]
 mod shape_tests {
     use crate::Tensor;
 
     #[test]
+    fn new_1d() {
+        let empty: Tensor<f32> = Tensor::new_1d(vec![]);
+        assert_eq!(empty.shape, vec![0]);
+        assert_eq!(empty.data.len(), 0);
+
+        let actual = Tensor::new_1d(vec![1.0, 2.0, 3.0]);
+        assert_eq!(actual.shape, vec![3]);
+        assert_eq!(actual.data, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn new_2d() {
+        let empty: Tensor<f32> = Tensor::new_2d(vec![vec![]]);
+        assert_eq!(empty.shape, vec![0,0]);
+        assert_eq!(empty.data.len(), 0);
+
+        let actual = Tensor::new_2d(vec![
+            vec![1.0, 2.0, 3.0],
+            vec![4.0, 5.0, 6.0]]
+        );
+        assert_eq!(actual.shape, vec![2,3]);
+        assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+    #[test]
+    #[should_panic(expected = "")]
+    fn new_2d_jagged() {
+        let _ = Tensor::new_2d(vec![
+            vec![1.0, 2.0, 3.0],
+            vec![4.0, 5.0]]
+        );
+    }
+
+    #[test]
     fn new() {
-        let empty: Tensor<f64>= Tensor::new(vec![0,0,0], vec![]);
+        let empty: Tensor<f64> = Tensor::new(vec![0,0,0], vec![]);
         assert_eq!(empty.shape, vec![0,0,0]);
         assert_eq!(empty.data.len(), 0);
 
         // 0D
-        let _ = Tensor::new(vec![1], vec![1.0]);
+        let actual = Tensor::new(vec![1], vec![1.0]);
+        assert_eq!(actual.shape, vec![1]);
+        assert_eq!(actual.data, vec![1.0]);
 
         // 1D
-        let _ = Tensor::new(vec![3], vec![1.0, 2.0, 3.0]);
+        let actual = Tensor::new(vec![3], vec![1.0, 2.0, 3.0]);
+        assert_eq!(actual.shape, vec![3]);
+        assert_eq!(actual.data, vec![1.0, 2.0, 3.0]);
 
         // 2D
-        let _ = Tensor::new(vec![2,3], vec![
+        let actual = Tensor::new(vec![2,3], vec![
             1.0, 2.0, 3.0,
             4.0, 5.0, 6.0
         ]);
-        let _ = Tensor::new(vec![1,3,2], vec![
+        assert_eq!(actual.shape, vec![2,3]);
+        assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        let actual = Tensor::new(vec![3,2], vec![
             1.0, 2.0,
             3.0, 4.0,
             5.0, 6.0
         ]);
+        assert_eq!(actual.shape, vec![3,2]);
+        assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
         // 3D
-        let _ = Tensor::new(vec![2,3,2], vec![
+        let actual = Tensor::new(vec![2,3,2], vec![
             1.0, 2.0,
             3.0, 4.0,
             5.0, 6.0,
@@ -113,9 +284,11 @@ mod shape_tests {
             3.0, 4.0,
             5.0, 6.0
         ]);
+        assert_eq!(actual.shape, vec![2,3,2]);
+        assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         
         // 4D
-        let _ = Tensor::new(vec![2,2,2,2], vec![
+        let actual = Tensor::new(vec![2,2,2,2], vec![
             // Assuming NCHW,
             // Batch 0, Channel 0
             1.0, 2.0,
@@ -133,6 +306,9 @@ mod shape_tests {
             13.0, 14.0,
             15.0, 16.0
         ]);
+        assert_eq!(actual.shape, vec![2,2,2,2]);
+        assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+                                     9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]);
 
         // TODO: Add more--for example, what about shape: [1,0,1]?
     }
@@ -141,31 +317,119 @@ mod shape_tests {
     fn new_invalid_shape() {
         let _ = Tensor::new(vec![2], vec![1.0, 2.0, 3.0]);
     }
-
+    
     #[test]
-    fn new_1d() {
-        let empty: Tensor<f32> = Tensor::new_1d(vec![]);
-        assert_eq!(empty.shape, vec![0]);
-        assert_eq!(empty.data.len(), 0);
-        let _ = Tensor::new_1d(vec![1.0, 2.0, 3.0]);
+    fn zeros() {
+        // 0D
+        let d0: Tensor<f64> = Tensor::zeros(vec![1]);
+        assert_eq!(d0.shape, vec![1]);
+        assert_eq!(d0.data, vec![0.0; 1]);
+
+        // 1D
+        let d1: Tensor<f64> = Tensor::zeros(vec![5]);
+        assert_eq!(d1.shape, vec![5]);
+        assert_eq!(d1.data, vec![0.0; 5]);
+
+        // 2D
+        let d1: Tensor<f64> = Tensor::zeros(vec![15, 30]);
+        assert_eq!(d1.shape, vec![15, 30]);
+        assert_eq!(d1.data, vec![0.0; 15 * 30]);
+
+        // 3D
+        let d1: Tensor<f64> = Tensor::zeros(vec![15, 30, 100]);
+        assert_eq!(d1.shape, vec![15, 30, 100]);
+        assert_eq!(d1.data, vec![0.0; 15 * 30 * 100]);
+
+        // 4D
+        let d1: Tensor<f64> = Tensor::zeros(vec![15, 30, 100, 5]);
+        assert_eq!(d1.shape, vec![15, 30, 100, 5]);
+        assert_eq!(d1.data, vec![0.0; 15 * 30 * 100 * 5]);
+    }
+    
+    #[test]
+    fn ones() {
+        // 0D
+        let d0: Tensor<f64> = Tensor::ones(vec![1]);
+        assert_eq!(d0.shape, vec![1]);
+        assert_eq!(d0.data, vec![1.0; 1]);
+
+        // 1D
+        let d1: Tensor<f64> = Tensor::ones(vec![5]);
+        assert_eq!(d1.shape, vec![5]);
+        assert_eq!(d1.data, vec![1.0; 5]);
+
+        // 2D
+        let d1: Tensor<f64> = Tensor::ones(vec![15, 30]);
+        assert_eq!(d1.shape, vec![15, 30]);
+        assert_eq!(d1.data, vec![1.0; 15 * 30]);
+
+        // 3D
+        let d1: Tensor<f64> = Tensor::ones(vec![15, 30, 100]);
+        assert_eq!(d1.shape, vec![15, 30, 100]);
+        assert_eq!(d1.data, vec![1.0; 15 * 30 * 100]);
+
+        // 4D
+        let d1: Tensor<f64> = Tensor::ones(vec![15, 30, 100, 5]);
+        assert_eq!(d1.shape, vec![15, 30, 100, 5]);
+        assert_eq!(d1.data, vec![1.0; 15 * 30 * 100 * 5]);
+    }
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use crate::Tensor;
+    use crate::tensor::Flt;
+
+    fn check_add<'a, T: Flt>(lhs: &'a Tensor<'a, T>, rhs: &'a Tensor<'a, T>, expected: Vec<T>) {
+        let actual = lhs + rhs;
+        assert_eq!(actual.data, expected);
+
+        actual.bwd();
+        let lhs_grad = lhs.grad.as_ref().unwrap().borrow();
+        let rhs_grad = rhs.grad.as_ref().unwrap().borrow();
+        assert_eq!(*lhs_grad, vec![T::one(); lhs.shape.iter().product()]);
+        assert_eq!(*rhs_grad, vec![T::one(); rhs.shape.iter().product()]);
     }
 
     #[test]
-    fn new_2d() {
-        let empty: Tensor<f32> = Tensor::new_2d(vec![vec![]]);
-        assert_eq!(empty.shape, vec![0,0]);
-        assert_eq!(empty.data.len(), 0);
-        let _ = Tensor::new_2d(vec![
-            vec![1.0, 2.0, 3.0],
-            vec![4.0, 5.0, 6.0]]
-        );
+    fn add() {
+        // 0d
+        let a = Tensor::new(vec![1], vec![5.0]);
+        let b = Tensor::new(vec![1], vec![6.0]);
+        let expected = vec![11.0];
+        check_add(&a, &b, expected);
+
+        // 1d
+        let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0]);
+        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
+        let expected = vec![3.0, 2.0, -4.0];
+        check_add(&a, &b, expected);
+
+        // 2d
+        let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]);
+        let b = Tensor::new(vec![2, 2], vec![1.0, 4.0, 7.0, 10.0]);
+        let expected = vec![6.0, 10.0, 14.0, 18.0];
+        check_add(&a, &b, expected);
+
+        // 3d
+        let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        let b = Tensor::new(vec![2, 2, 2], vec![4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]);
+        let expected = vec![4.0, 7.0, 10.0, 13.0, 16.0, 19.0, 22.0, 25.0];
+        check_add(&a, &b, expected);
+
+        // 4d
+        let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+        let b = Tensor::new(vec![2, 2, 2, 2], vec![8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0]);
+        let expected = vec![8.0, 11.0, 14.0, 17.0, 20.0, 23.0, 26.0, 29.0, 32.0, 35.0, 38.0, 41.0, 44.0, 47.0, 50.0, 53.0];
+        check_add(&a, &b, expected);
     }
     #[test]
     #[should_panic(expected = "")]
-    fn new_2d_jagged() {
-        let _ = Tensor::new_2d(vec![
-            vec![1.0, 2.0, 3.0],
-            vec![4.0, 5.0]]
-        );
+    fn add_shape_mismatch() {
+        // 0d
+        let a = Tensor::new(vec![1], vec![5.0]);
+        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
+        let expected = vec![7.0, 3.0, -6.0];
+        check_add(&a, &b, expected);
     }
 }
