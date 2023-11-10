@@ -10,8 +10,10 @@ use num_traits::Float;
 
 use crate::TensorError;
 
-pub trait Flt: Float + std::ops::AddAssign + Display + Debug {}
-impl<T: Float + std::ops::AddAssign + Display + Debug> Flt for T {}
+// If I wanted to support fixed point data, I'd replace the Float trait with Num. Unfortunately, it would be very
+// cumbersome to support exponentiation, event just for f32 and f64, so for now I'm going to stick to floats only
+pub trait Dtype: Float + Display + Debug + Copy + std::ops::AddAssign + std::clone::Clone {}
+impl<T: Float + Display + Debug + Copy + std::ops::AddAssign + std::clone::Clone> Dtype for T {}
 
 // This is inspired by PyTorch's no_grad(), and is definitely not idiomatic Rust. If this were production code, I'd
 // probably just bite the bullet and make grad and no_grad versions of the constructors. But right now, it's just a
@@ -31,7 +33,7 @@ pub struct Tensor<'a, T> {
 }
 
 // Constructors
-impl<'a, T: Flt> Tensor<'a, T> {
+impl<'a, T: Dtype> Tensor<'a, T> {
     pub fn new_0d(data: T) -> Tensor<'a, T> {
         unsafe {
             let grad = if REQUIRES_GRAD {
@@ -133,7 +135,7 @@ impl<'a, T: Flt> Tensor<'a, T> {
 }
 
 // Misc
-impl<'a, T: Flt> Tensor<'a, T> {
+impl<'a, T: Dtype> Tensor<'a, T> {
     pub fn get_requires_grad(&self) -> bool {
         self.requires_grad
     }
@@ -177,7 +179,7 @@ impl<'a, T: Flt> Tensor<'a, T> {
         }
     }
 }
-impl<'a, T: Flt> Display for Tensor<'a, T> {
+impl<'a, T: Dtype> Display for Tensor<'a, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Data:")?;
         Tensor::print_vec_as_tensor(&self.shape, &self.data, f)?;
@@ -201,7 +203,7 @@ impl<'a, T> Hash for Tensor<'a, T> {
 }
 
 // Autograd
-impl<'a, T: Flt> Tensor<'a, T> {
+impl<'a, T: Dtype> Tensor<'a, T> {
     fn update_grad(grad: &mut Vec<T>, updates: &Vec<T>) {
         for (g, u) in grad.iter_mut().zip(updates.iter()) {
             *g += *u;
@@ -245,7 +247,7 @@ impl<'a, T: Flt> Tensor<'a, T> {
 }
 
 // Operators
-impl<'a, T: Flt> Tensor<'a, T> {
+impl<'a, T: Dtype> Tensor<'a, T> {
     fn add_bwd(&self, ctx: &BackPropCtx<'a, T>) {
         let updates = self.grad.as_ref().expect("Self gradient was None during add back propagation.").borrow();
         let mut lhs_grad = ctx.lhs.expect("LHS Tensor was none during add back propagation")
@@ -257,7 +259,7 @@ impl<'a, T: Flt> Tensor<'a, T> {
         Tensor::update_grad(&mut rhs_grad, &updates);
     }
 }
-impl<'a, T: Flt> Add<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
+impl<'a, T: Dtype> Add<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
     type Output = Tensor<'a, T>;
     fn add(self, rhs: &'a Tensor<'a, T>) -> Tensor<'a, T> {
         assert!(self.check_shape(rhs), "Cannot add tensors with different shapes ({:?} !+ {:?}",
@@ -293,9 +295,9 @@ mod constructor_tests {
         assert_eq!(empty.shape, vec![0]);
         assert_eq!(empty.data.len(), 0);
 
-        let actual = Tensor::new_1d(vec![1.0, 2.0, 3.0]);
+        let actual = Tensor::new_1d(vec![1.0_f32, 2.0_f32, 3.0_f32]);
         assert_eq!(actual.shape, vec![3]);
-        assert_eq!(actual.data, vec![1.0, 2.0, 3.0]);
+        assert_eq!(actual.data, vec![1.0_f32, 2.0_f32, 3.0_f32]);
     }
 
     #[test]
@@ -479,10 +481,10 @@ mod misc_tests {
 mod operator_tests {
     use crate::error::TensorError;
     use crate::Tensor;
-    use crate::tensor::Flt;
+    use crate::tensor::Dtype;
     use crate::tensor::REQUIRES_GRAD;
 
-    fn check_add<'a, T: Flt>(lhs: &'a Tensor<'a, T>, rhs: &'a Tensor<'a, T>, expected: Vec<T>) {
+    fn check_add<'a, T: Dtype>(lhs: &'a Tensor<'a, T>, rhs: &'a Tensor<'a, T>, expected: Vec<T>) {
         let actual = lhs + rhs;
         assert_eq!(actual.data, expected);
 
@@ -497,9 +499,9 @@ mod operator_tests {
     fn add_with_grad() {
         unsafe {REQUIRES_GRAD = true;}
         // 0d
-        let a = Tensor::new(vec![1], vec![5.0]);
-        let b = Tensor::new(vec![1], vec![6.0]);
-        let expected = vec![11.0];
+        let a = Tensor::new(vec![1], vec![5.0_f32]);
+        let b = Tensor::new(vec![1], vec![6.0_f32]);
+        let expected = vec![11.0_f32];
         check_add(&a, &b, expected);
 
         // 1d
