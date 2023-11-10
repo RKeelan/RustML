@@ -1,22 +1,22 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::fmt::{Debug, Display, Formatter, Result};
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::Add;
 
 use derivative::Derivative;
 use num_traits::Float;
 
+use crate::TensorError;
 
 pub trait Flt: Float + std::ops::AddAssign + Display + Debug {}
 impl<T: Float + std::ops::AddAssign + Display + Debug> Flt for T {}
 
-#[derive(Debug, Default)]
-struct BackPropCtx<'a, T> {
-    lhs: Option<&'a Tensor<'a, T>>,
-    rhs: Option<&'a Tensor<'a, T>>,
-}
+// This is inspired by PyTorch's no_grad(), and is definitely not idiomatic Rust. If this were production code, I'd
+// probably just bite the bullet and make grad and no_grad versions of the constructors. But right now, it's just a
+// learning project, so I'm taking the lazy route.
+pub static mut REQUIRES_GRAD: bool = false;
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -24,6 +24,7 @@ pub struct Tensor<'a, T> {
     pub shape: Vec<usize>,
     pub data: Vec<T>,
     pub grad: Option<RefCell<Vec<T>>>,
+    requires_grad: bool,
     #[derivative(Debug="ignore")]
     back_prop_fn: Option<fn(result: &Tensor<'a, T>, ctx: &BackPropCtx<'a, T>)>,
     back_prop_ctx: Option<BackPropCtx<'a, T>>,
@@ -32,23 +33,41 @@ pub struct Tensor<'a, T> {
 // Constructors
 impl<'a, T: Flt> Tensor<'a, T> {
     pub fn new_0d(data: T) -> Tensor<'a, T> {
-        Tensor {
-            shape: vec![1],
-            data: vec![data],
-            grad: Some(RefCell::new(vec![T::zero(); 1])),
-            back_prop_fn: None,
-            back_prop_ctx: None,
+        unsafe {
+            let grad = if REQUIRES_GRAD {
+                Some(RefCell::new(vec![T::zero(); 1]))
+            }
+            else {
+                None
+            };
+            Tensor {
+                shape: vec![1],
+                data: vec![data],
+                grad: grad,
+                requires_grad: REQUIRES_GRAD,
+                back_prop_fn: None,
+                back_prop_ctx: None,
+            }
         }
     }
 
     pub fn new_1d(data: Vec<T>) -> Tensor<'a, T> {
         let length = data.len();
-        Tensor {
-            shape: vec![data.len()],
-            data,
-            grad: Some(RefCell::new(vec![T::zero(); length])),
-            back_prop_fn: None,
-            back_prop_ctx: None,
+        unsafe {
+            let grad = if REQUIRES_GRAD {
+                Some(RefCell::new(vec![T::zero(); length]))
+            }
+            else {
+                None
+            };
+            Tensor {
+                shape: vec![data.len()],
+                data,
+                grad: grad,
+                requires_grad: REQUIRES_GRAD,
+                back_prop_fn: None,
+                back_prop_ctx: None,
+            }
         }
     }
 
@@ -62,25 +81,43 @@ impl<'a, T: Flt> Tensor<'a, T> {
             0 => vec![0, 0],
             _ => vec![data.len(), row_len[0]]
         };
+        unsafe {
+            let grad = if REQUIRES_GRAD {
+                Some(RefCell::new(vec![T::zero(); length]))
+            }
+            else {
+                None
+            };
 
-        Tensor {
-            shape: shape,
-            data: data.into_iter().flatten().collect(),
-            grad: Some(RefCell::new(vec![T::zero(); length])),
-            back_prop_fn: None,
-            back_prop_ctx: None,
+            Tensor {
+                shape: shape,
+                data: data.into_iter().flatten().collect(),
+                grad: grad,
+                requires_grad: REQUIRES_GRAD,
+                back_prop_fn: None,
+                back_prop_ctx: None,
+            }
         }
     }
     
     pub fn new(shape: Vec<usize>, data: Vec<T>) -> Tensor<'a, T> {
         let length = data.len();
         assert_eq!(shape.iter().product::<usize>(), length);
-        Tensor {
-            shape,
-            data,
-            grad: Some(RefCell::new(vec![T::zero(); length])),
-            back_prop_fn: None,
-            back_prop_ctx: None,
+        unsafe {
+            let grad = if REQUIRES_GRAD {
+                Some(RefCell::new(vec![T::zero(); length]))
+            }
+            else {
+                None
+            };
+            Tensor {
+                shape,
+                data,
+                grad: grad,
+                requires_grad: REQUIRES_GRAD,
+                back_prop_fn: None,
+                back_prop_ctx: None,
+            }
         }
     }
 
@@ -97,12 +134,32 @@ impl<'a, T: Flt> Tensor<'a, T> {
 
 // Misc
 impl<'a, T: Flt> Tensor<'a, T> {
+    pub fn get_requires_grad(&self) -> bool {
+        self.requires_grad
+    }
+
+    pub fn set_requires_grad(&mut self, requires_grad: bool) {
+        if self.requires_grad == requires_grad {
+            // Idempotent function; return early
+            return;
+        }
+
+        self.requires_grad = requires_grad;
+        if requires_grad {
+            self.grad = Some(RefCell::new(vec![T::zero(); self.shape.iter().product()]));
+        }
+        else {
+            // If the tensor doesn't need a grad, we can get rid of the one we had
+            self.grad = None;
+        }
+    }
+
     fn check_shape(&self, other: &Tensor<T>) -> bool {
         // TODO Relax this constraint to allow broadcasting
         self.shape == other.shape
     }
 
-    fn print_vec_as_tensor(shape: &Vec<usize>, vec: &Vec<T>, f: &mut Formatter<'_>) -> Result {
+    fn print_vec_as_tensor(shape: &Vec<usize>, vec: &Vec<T>, f: &mut Formatter<'_>) -> std::fmt::Result {
         match shape.len() {
             1 => { writeln!(f, "{:?}", vec) }
             2 => {
@@ -121,7 +178,7 @@ impl<'a, T: Flt> Tensor<'a, T> {
     }
 }
 impl<'a, T: Flt> Display for Tensor<'a, T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Data:")?;
         Tensor::print_vec_as_tensor(&self.shape, &self.data, f)?;
         if let Some(grad) = &self.grad {
@@ -151,7 +208,10 @@ impl<'a, T: Flt> Tensor<'a, T> {
         }
     }
 
-    pub fn visit<'b>(topological_ordering: &mut Vec<&'b Tensor<'a, T>>, visited: &mut HashSet<&'b Tensor<'a, T>>, tensor: &'b Tensor<'a, T>) {
+    pub fn visit<'b>(
+        topological_ordering: &mut Vec<&'b Tensor<'a, T>>,
+        visited: &mut HashSet<&'b Tensor<'a, T>>,
+        tensor: &'b Tensor<'a, T>) {
         if !visited.contains(tensor) {
             visited.insert(tensor);
             if let Some(lhs) = tensor.back_prop_ctx.as_ref().map(|ctx| ctx.rhs.unwrap()) {
@@ -164,7 +224,11 @@ impl<'a, T: Flt> Tensor<'a, T> {
         }
     }
     
-    pub fn bwd(&self) {
+    pub fn bwd(&self) -> Result<(), TensorError> {
+        if !self.requires_grad {
+            return Err(TensorError::NoGrad);
+        }
+
         // Build a topological ordering of the graph
         let mut topological_ordering = Vec::<&Tensor<'a, T>>::new();
         let mut visited = HashSet::<&Tensor<'a, T>>::new();
@@ -176,6 +240,7 @@ impl<'a, T: Flt> Tensor<'a, T> {
                 tensor.back_prop_fn.expect("Backpropagation function was None")(tensor, &ctx);
             }
         }
+        Ok(())
     }
 }
 
@@ -199,14 +264,27 @@ impl<'a, T: Flt> Add<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
             self.shape, rhs.shape);
         let res_data = self.data.iter().zip(rhs.data.iter()).map(|(&a, &b)| a + b).collect();
         let mut res = Tensor::new(self.shape.clone(), res_data);
-        res.back_prop_fn = Some(Tensor::add_bwd);
-        res.back_prop_ctx = Some(BackPropCtx { lhs: Some(self), rhs: Some(rhs) });
+        if self.requires_grad {
+            res.back_prop_fn = Some(Tensor::add_bwd);
+            res.back_prop_ctx = Some(BackPropCtx { lhs: Some(self), rhs: Some(rhs) });
+        }
+        else {
+            res.requires_grad = false;
+        }
         res
     }
 }
+// TODO I think there's probably a way to implement a non-borrowing overloads, but I'd only bother if I can leverage
+// the borrowing versions; I don't want to duplicate code
+
+#[derive(Debug, Default)]
+struct BackPropCtx<'a, T> {
+    lhs: Option<&'a Tensor<'a, T>>,
+    rhs: Option<&'a Tensor<'a, T>>,
+}
 
 #[cfg(test)]
-mod shape_tests {
+mod constructor_tests {
     use crate::Tensor;
 
     #[test]
@@ -376,15 +454,39 @@ mod shape_tests {
 }
 
 #[cfg(test)]
+mod misc_tests {
+    use crate::Tensor;
+
+    #[test]
+    fn grad_accessor() {
+        // 0d
+        let mut tensor = Tensor::new(vec![1], vec![5.0]);
+        assert!(!tensor.get_requires_grad());
+        assert!(tensor.grad.is_none());
+
+        {
+            tensor.set_requires_grad(true);
+            let grad = tensor.grad.as_ref().unwrap().borrow_mut();
+            assert_eq!(*grad, vec![0.0; tensor.shape.iter().product()]);
+        }
+
+        tensor.set_requires_grad(false);
+        assert!(tensor.grad.is_none());
+    }
+}
+
+#[cfg(test)]
 mod operator_tests {
+    use crate::error::TensorError;
     use crate::Tensor;
     use crate::tensor::Flt;
+    use crate::tensor::REQUIRES_GRAD;
 
     fn check_add<'a, T: Flt>(lhs: &'a Tensor<'a, T>, rhs: &'a Tensor<'a, T>, expected: Vec<T>) {
         let actual = lhs + rhs;
         assert_eq!(actual.data, expected);
 
-        actual.bwd();
+        actual.bwd().unwrap();
         let lhs_grad = lhs.grad.as_ref().unwrap().borrow();
         let rhs_grad = rhs.grad.as_ref().unwrap().borrow();
         assert_eq!(*lhs_grad, vec![T::one(); lhs.shape.iter().product()]);
@@ -392,7 +494,8 @@ mod operator_tests {
     }
 
     #[test]
-    fn add() {
+    fn add_with_grad() {
+        unsafe {REQUIRES_GRAD = true;}
         // 0d
         let a = Tensor::new(vec![1], vec![5.0]);
         let b = Tensor::new(vec![1], vec![6.0]);
@@ -422,6 +525,18 @@ mod operator_tests {
         let b = Tensor::new(vec![2, 2, 2, 2], vec![8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0]);
         let expected = vec![8.0, 11.0, 14.0, 17.0, 20.0, 23.0, 26.0, 29.0, 32.0, 35.0, 38.0, 41.0, 44.0, 47.0, 50.0, 53.0];
         check_add(&a, &b, expected);
+    }
+    #[test]
+    fn add_no_grad() {
+        // 0d
+        let a = Tensor::new(vec![1], vec![5.0]);
+        let b = Tensor::new(vec![1], vec![6.0]);
+        let actual = &a + &b;
+        let expected = vec![11.0];
+        assert_eq!(actual.data, expected);
+        assert!(a.grad.is_none());
+        assert!(b.grad.is_none());
+        assert_eq!(actual.bwd(), Err(TensorError::NoGrad));
     }
     #[test]
     #[should_panic(expected = "")]
