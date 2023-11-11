@@ -194,25 +194,38 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 
     fn print_vec_as_tensor(shape: &Vec<usize>, vec: &Vec<T>, f: &mut Formatter<'_>) -> std::fmt::Result {
         match shape.len() {
-            1 => { writeln!(f, "{:?}", vec) }
+            1 => { writeln!(f, " {:?}", vec) }
             2 => {
-                let cols = shape[1];
                 let rows = shape[0];
-                write!(f, "Shape: {:?} ", shape)?;
-                for i in 0..rows {
-                    let row = &vec[i * cols..(i + 1) * cols];
-                    write!(f, "{:?}", row)?;
+                let cols = shape[1];
+                let first_row = &vec[0..cols];
+                write!(f, "\n[{:?}", first_row)?;
+                if rows == 1 {
+                    writeln!(f, "]")?;
+                    return Ok(());
                 }
-                writeln!(f, "")
+                else {
+                    writeln!(f, "")?;
+                }
+                for i in 1..rows-1 {
+                    let row = &vec[(i * cols)..((i + 1) * cols)];
+                    writeln!(f, " {:?}", row)?;
+                }
+                writeln!(f, " {:?}]", &vec[((rows-1) * cols)..((rows) * cols)])
             }
             // TODO: I'd like to handle this more nicely, by printing the tensor in 2D blocks, the way PyTorch does
-            _ => { writeln!(f, "{:?}: {:?}", shape, vec) }
+            _ => { writeln!(f, " {:?}: {:?}", shape, vec) }
         }
+    }
+
+    fn canary(&self, exp: T) -> T {
+        let value = self.data[0];
+        value.pow(exp) * value.exp()
     }
 }
 impl<'a, T: Dtype> Display for Tensor<'a, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Data:")?;
+        write!(f, "Data:")?;
         Tensor::print_vec_as_tensor(&self.shape, &self.data, f)?;
         if let Some(grad) = &self.grad {
             writeln!(f, "Grad:")?;
