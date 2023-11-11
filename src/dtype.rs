@@ -8,15 +8,15 @@ pub trait Dtype: Num + Display + Debug + Copy + std::ops::AddAssign + std::clone
 }
 impl Dtype for i8 {
     fn pow(&self, exp: Self) -> Self { i8::pow(*self, exp as u32) }
-    fn exp(&self) -> Self { i8::exp(self) }
+    fn exp(&self) -> Self { panic!("i8 does not support exp") } 
 }
 impl Dtype for i16 {
     fn pow(&self, exp: Self) -> Self { i16::pow(*self, exp as u32) }
-    fn exp(&self) -> Self { i16::exp(self) }
+    fn exp(&self) -> Self { panic!("i16 does not support exp") } 
 }
 impl Dtype for i32 {
     fn pow(&self, exp: Self) -> Self { i32::pow(*self, exp as u32) }
-    fn exp(&self) -> Self { i32::exp(self) }
+    fn exp(&self) -> Self { panic!("i32 does not support exp") } 
 }
 // TODO Add f16 and bf16 support
 impl Dtype for f32 {
