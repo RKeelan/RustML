@@ -34,7 +34,21 @@ def generate_add_tests():
     b = torch.FloatTensor(list(range(8,40,2))).reshape(2,2,2,2); b.requires_grad=True
     add("4d", a, b)
 
-
+def generate_get_tests():
+    a = torch.tensor(list(range(9))).reshape(3,3)
+    print(f"a[0,0]={a[0,1]}")
+    print(f"a[1,1]={a[1,1]}")
+    print(f"a[2,2]={a[2,2]}")
+    
+    b = torch.tensor(list(range(27))).reshape(3,3,3)
+    print(f"b[0,0,2]={b[0,0,2]}")
+    print(f"b[1,1,1]={b[1,1,1]}")
+    print(f"b[2,0,0]={b[2,0,0]}")
+    
+    c = torch.tensor(list(range(81))).reshape(3,3,3,3)
+    print(f"b[0,0,2,1]={c[0,0,2,1]}")
+    print(f"b[1,1,1,0]={c[1,1,1,0]}")
+    print(f"b[2,0,0,2]={c[2,0,0,2]}")
 
 def main(args):
     parser = argparse.ArgumentParser(description="Generate test data for the Rust ml package")
@@ -43,6 +57,8 @@ def main(args):
 
     if args.test == "add":
         generate_add_tests()
+    elif args.test == "get":
+        generate_get_tests()
     else:
         print(f"Unknown test: {args.test}")
 

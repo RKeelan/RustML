@@ -132,9 +132,39 @@ impl<'a, T: Dtype> Tensor<'a, T> {
     }
 }
 
-// Misc
+// Accessors
 impl<'a, T: Dtype> Tensor<'a, T> {
-    pub fn get_requires_grad(&self) -> bool {
+    pub fn element(&self, indices: Vec<usize>) -> T {
+        if indices.len() != self.shape.len() {
+            panic!("Cannot index into a {}-rank tensor with {:?}.", self.shape.len(), indices);
+        }
+
+        for i in 0..indices.len() {
+            if indices[i] >= self.shape[i] {
+                panic!("Index {} ({}) is out of bounds for shape {:?}", i, indices[i], self.shape);
+            }
+        }
+
+        let pos = indices.iter().zip(self.shape.iter()).fold(0, |acc, (&index, &dim)| acc * dim + index);
+        self.data[pos]
+    }
+
+    pub fn set_element(&mut self, indices: Vec<usize>, value: T) {
+        if indices.len() != self.shape.len() {
+            panic!("Cannot index into a {}-rank tensor with {:?}.", self.shape.len(), indices);
+        }
+
+        for i in 0..indices.len() {
+            if indices[i] >= self.shape[i] {
+                panic!("Index {} ({}) is out of bounds for shape {:?}", i, indices[i], self.shape);
+            }
+        }
+
+        let pos = indices.iter().zip(self.shape.iter()).fold(0, |acc, (&index, &dim)| acc * dim + index);
+        self.data[pos] = value;
+    }
+
+    pub fn requires_grad(&self) -> bool {
         self.requires_grad
     }
 
@@ -153,7 +183,10 @@ impl<'a, T: Dtype> Tensor<'a, T> {
             self.grad = None;
         }
     }
+}
 
+// Misc
+impl<'a, T: Dtype> Tensor<'a, T> {
     fn check_shape(&self, other: &Tensor<T>) -> bool {
         // TODO Relax this constraint to allow broadcasting
         self.shape == other.shape
@@ -460,31 +493,30 @@ mod constructor_tests {
         assert_eq!(d1.data, vec![1.0; 5]);
 
         // 2D
-        let d1: Tensor<f64> = Tensor::ones(vec![15, 30]);
-        assert_eq!(d1.shape, vec![15, 30]);
-        assert_eq!(d1.data, vec![1.0; 15 * 30]);
+        let d2: Tensor<f64> = Tensor::ones(vec![15, 30]);
+        assert_eq!(d2.shape, vec![15, 30]);
+        assert_eq!(d2.data, vec![1.0; 15 * 30]);
 
         // 3D
-        let d1: Tensor<f64> = Tensor::ones(vec![15, 30, 100]);
-        assert_eq!(d1.shape, vec![15, 30, 100]);
-        assert_eq!(d1.data, vec![1.0; 15 * 30 * 100]);
+        let d3: Tensor<f64> = Tensor::ones(vec![15, 30, 100]);
+        assert_eq!(d3.shape, vec![15, 30, 100]);
+        assert_eq!(d3.data, vec![1.0; 15 * 30 * 100]);
 
         // 4D
-        let d1: Tensor<f64> = Tensor::ones(vec![15, 30, 100, 5]);
-        assert_eq!(d1.shape, vec![15, 30, 100, 5]);
-        assert_eq!(d1.data, vec![1.0; 15 * 30 * 100 * 5]);
+        let d4: Tensor<f64> = Tensor::ones(vec![15, 30, 100, 5]);
+        assert_eq!(d4.shape, vec![15, 30, 100, 5]);
+        assert_eq!(d4.data, vec![1.0; 15 * 30 * 100 * 5]);
     }
 }
 
 #[cfg(test)]
-mod misc_tests {
+mod accessor_tests {
     use crate::Tensor;
-
     #[test]
     fn grad_accessor() {
         // 0d
         let mut tensor = Tensor::new(vec![1], vec![5.0]);
-        assert!(!tensor.get_requires_grad());
+        assert!(!tensor.requires_grad());
         assert!(tensor.grad.is_none());
 
         {
@@ -496,6 +528,66 @@ mod misc_tests {
         tensor.set_requires_grad(false);
         assert!(tensor.grad.is_none());
     }
+
+    #[test]
+    fn data_accessor() {
+        // 0D
+        let mut d0 = Tensor::new_0d(1);
+        let mut d1 = Tensor::new_1d((1..11).collect());
+        let mut d2 = Tensor::new(vec![3,3],(0..9).map(|x| x as f32).collect());
+        let mut d3 = Tensor::new(vec![3,3,3],(0..27).map(|x| x as f32).collect());
+        let mut d4 = Tensor::new(vec![3,3,3,3],(0..81).map(|x| x as f32).collect());
+
+        assert_eq!(d0.element(vec![0]), 1);
+
+        assert_eq!(d1.element(vec![1]), 2);
+        assert_eq!(d1.element(vec![9]), 10);
+        
+        assert_eq!(d2.element(vec![0,1]), 1.0);
+        assert_eq!(d2.element(vec![1,1]), 4.0);
+        assert_eq!(d2.element(vec![2,2]), 8.0);
+        
+        assert_eq!(d3.element(vec![0,0,2]), 2.0);
+        assert_eq!(d3.element(vec![1,1,1]), 13.0);
+        assert_eq!(d3.element(vec![2,0,0]), 18.0);
+
+        assert_eq!(d4.element(vec![0,0,2,1]), 7.0);
+        assert_eq!(d4.element(vec![1,1,1,0]), 39.0);
+        assert_eq!(d4.element(vec![2,0,0,2]), 56.0);
+
+
+        d0.set_element(vec![0], 0);
+        d1.set_element(vec![1], 0);
+        d1.set_element(vec![9], 0);
+        d2.set_element(vec![0,1], 0.0);
+        d2.set_element(vec![1,1], 0.0);
+        d2.set_element(vec![2,2], 0.0);
+        d3.set_element(vec![0,0,2], 0.0);
+        d3.set_element(vec![1,1,1], 0.0);
+        d3.set_element(vec![2,0,0], 0.0);
+        d4.set_element(vec![0,0,2,1], 0.0);
+        d4.set_element(vec![1,1,1,0], 0.0);
+        d4.set_element(vec![2,0,0,2], 0.0);
+
+        assert_eq!(d0.element(vec![0]), 0);
+
+        assert_eq!(d1.element(vec![1]), 0);
+        assert_eq!(d1.element(vec![9]), 0);
+        
+        assert_eq!(d2.element(vec![0,0]), 0.0);
+        assert_eq!(d2.element(vec![1,1]), 0.0);
+        assert_eq!(d2.element(vec![2,2]), 0.0);
+        
+        assert_eq!(d3.element(vec![0,0,2]), 0.0);
+        assert_eq!(d3.element(vec![1,1,1]), 0.0);
+        assert_eq!(d3.element(vec![2,0,0]), 0.0);
+
+        assert_eq!(d4.element(vec![0,0,2,1]), 0.0);
+        assert_eq!(d4.element(vec![1,1,1,0]), 0.0);
+        assert_eq!(d4.element(vec![2,0,0,2]), 0.0);
+    }
+
+    
 }
 
 #[cfg(test)]
