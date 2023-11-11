@@ -6,19 +6,17 @@ use std::hash::{Hash, Hasher};
 use std::ops::Add;
 
 use derivative::Derivative;
-use num_traits::Float;
 
+use crate::Dtype;
 use crate::TensorError;
 
-// If I wanted to support fixed point data, I'd replace the Float trait with Num. Unfortunately, it would be very
-// cumbersome to support exponentiation, event just for f32 and f64, so for now I'm going to stick to floats only
-pub trait Dtype: Float + Display + Debug + Copy + std::ops::AddAssign + std::clone::Clone {}
-impl<T: Float + Display + Debug + Copy + std::ops::AddAssign + std::clone::Clone> Dtype for T {}
 
 // This is inspired by PyTorch's no_grad(), and is definitely not idiomatic Rust. If this were production code, I'd
 // probably just bite the bullet and make grad and no_grad versions of the constructors. But right now, it's just a
 // learning project, so I'm taking the lazy route.
 pub static mut REQUIRES_GRAD: bool = false;
+
+// TODO: Following PyTorch, disallow gradients for integer-based tensors
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -290,6 +288,29 @@ mod constructor_tests {
     use crate::Tensor;
 
     #[test]
+    fn new_0d() {
+        let actual = Tensor::new_0d(1i8);
+        assert_eq!(actual.shape, vec![1]);
+        assert_eq!(actual.data, vec![1i8]);
+
+        let actual = Tensor::new_0d(0_i16);
+        assert_eq!(actual.shape, vec![1]);
+        assert_eq!(actual.data, vec![0_i16]);
+        
+        let actual = Tensor::new_0d(-3);
+        assert_eq!(actual.shape, vec![1]);
+        assert_eq!(actual.data, vec![-3]);
+
+        let actual = Tensor::new_0d(1.0_f32);
+        assert_eq!(actual.shape, vec![1]);
+        assert_eq!(actual.data, vec![1.0_f32]);
+
+        let actual = Tensor::new_0d(-1.5);
+        assert_eq!(actual.shape, vec![1]);
+        assert_eq!(actual.data, vec![-1.5]);
+    }
+
+    #[test]
     fn new_1d() {
         let empty: Tensor<f32> = Tensor::new_1d(vec![]);
         assert_eq!(empty.shape, vec![0]);
@@ -535,6 +556,18 @@ mod operator_tests {
         let b = Tensor::new(vec![1], vec![6.0]);
         let actual = &a + &b;
         let expected = vec![11.0];
+        assert_eq!(actual.data, expected);
+        assert!(a.grad.is_none());
+        assert!(b.grad.is_none());
+        assert_eq!(actual.bwd(), Err(TensorError::NoGrad));
+    }
+    #[test]
+    fn add_int() {
+        // 0d
+        let a = Tensor::new(vec![1], vec![50]);
+        let b = Tensor::new(vec![1], vec![60]);
+        let actual = &a + &b;
+        let expected = vec![110];
         assert_eq!(actual.data, expected);
         assert!(a.grad.is_none());
         assert!(b.grad.is_none());
