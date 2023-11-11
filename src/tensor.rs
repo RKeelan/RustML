@@ -164,6 +164,11 @@ impl<'a, T: Dtype> Tensor<'a, T> {
         self.data[pos] = value;
     }
 
+    pub fn increment_element(&mut self, indices: Vec<usize>) {
+        let element = self.element(indices.clone());
+        self.set_element(indices, element + T::one());
+    }
+
     pub fn requires_grad(&self) -> bool {
         self.requires_grad
     }
@@ -543,7 +548,7 @@ mod accessor_tests {
     }
 
     #[test]
-    fn data_accessor() {
+    fn element_accessor() {
         // 0D
         let mut d0 = Tensor::new_0d(1);
         let mut d1 = Tensor::new_1d((1..11).collect());
@@ -552,22 +557,17 @@ mod accessor_tests {
         let mut d4 = Tensor::new(vec![3,3,3,3],(0..81).map(|x| x as f32).collect());
 
         assert_eq!(d0.element(vec![0]), 1);
-
         assert_eq!(d1.element(vec![1]), 2);
         assert_eq!(d1.element(vec![9]), 10);
-        
         assert_eq!(d2.element(vec![0,1]), 1.0);
         assert_eq!(d2.element(vec![1,1]), 4.0);
         assert_eq!(d2.element(vec![2,2]), 8.0);
-        
         assert_eq!(d3.element(vec![0,0,2]), 2.0);
         assert_eq!(d3.element(vec![1,1,1]), 13.0);
         assert_eq!(d3.element(vec![2,0,0]), 18.0);
-
         assert_eq!(d4.element(vec![0,0,2,1]), 7.0);
         assert_eq!(d4.element(vec![1,1,1,0]), 39.0);
         assert_eq!(d4.element(vec![2,0,0,2]), 56.0);
-
 
         d0.set_element(vec![0], 0);
         d1.set_element(vec![1], 0);
@@ -583,24 +583,44 @@ mod accessor_tests {
         d4.set_element(vec![2,0,0,2], 0.0);
 
         assert_eq!(d0.element(vec![0]), 0);
-
         assert_eq!(d1.element(vec![1]), 0);
         assert_eq!(d1.element(vec![9]), 0);
-        
-        assert_eq!(d2.element(vec![0,0]), 0.0);
+        assert_eq!(d2.element(vec![0,1]), 0.0);
         assert_eq!(d2.element(vec![1,1]), 0.0);
         assert_eq!(d2.element(vec![2,2]), 0.0);
-        
         assert_eq!(d3.element(vec![0,0,2]), 0.0);
         assert_eq!(d3.element(vec![1,1,1]), 0.0);
         assert_eq!(d3.element(vec![2,0,0]), 0.0);
-
         assert_eq!(d4.element(vec![0,0,2,1]), 0.0);
         assert_eq!(d4.element(vec![1,1,1,0]), 0.0);
         assert_eq!(d4.element(vec![2,0,0,2]), 0.0);
-    }
 
-    
+        d0.increment_element(vec![0]);
+        d1.increment_element(vec![1]);
+        d1.increment_element(vec![9]);
+        d2.increment_element(vec![0,1]);
+        d2.increment_element(vec![1,1]);
+        d2.increment_element(vec![2,2]);
+        d3.increment_element(vec![0,0,2]);
+        d3.increment_element(vec![1,1,1]);
+        d3.increment_element(vec![2,0,0]);
+        d4.increment_element(vec![0,0,2,1]);
+        d4.increment_element(vec![1,1,1,0]);
+        d4.increment_element(vec![2,0,0,2]);
+
+        assert_eq!(d0.element(vec![0]), 1);
+        assert_eq!(d1.element(vec![1]), 1);
+        assert_eq!(d1.element(vec![9]), 1);
+        assert_eq!(d2.element(vec![0,1]), 1.0);
+        assert_eq!(d2.element(vec![1,1]), 1.0);
+        assert_eq!(d2.element(vec![2,2]), 1.0);
+        assert_eq!(d3.element(vec![0,0,2]), 1.0);
+        assert_eq!(d3.element(vec![1,1,1]), 1.0);
+        assert_eq!(d3.element(vec![2,0,0]), 1.0);
+        assert_eq!(d4.element(vec![0,0,2,1]), 1.0);
+        assert_eq!(d4.element(vec![1,1,1,0]), 1.0);
+        assert_eq!(d4.element(vec![2,0,0,2]), 1.0);
+    }
 }
 
 #[cfg(test)]
