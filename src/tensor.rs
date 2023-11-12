@@ -21,9 +21,9 @@ pub static mut REQUIRES_GRAD: bool = false;
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct Tensor<'a, T> {
-    pub shape: Vec<usize>,
-    pub data: Vec<T>,
-    pub grad: Option<RefCell<Vec<T>>>,
+    shape: Vec<usize>,
+    data: Vec<T>,
+    grad: Option<RefCell<Vec<T>>>,
     requires_grad: bool,
     #[derivative(Debug="ignore")]
     back_prop_fn: Option<fn(result: &Tensor<'a, T>, ctx: &BackPropCtx<'a, T>)>,
@@ -134,6 +134,14 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 
 // Accessors
 impl<'a, T: Dtype> Tensor<'a, T> {
+    pub fn shape(&self) -> &Vec<usize> {
+        &self.shape
+    }
+
+    pub fn data(&self) -> &Vec<T> {
+        &self.data
+    }
+
     fn rank(&self) -> usize {
         self.shape.len()
     }
