@@ -41,7 +41,7 @@ impl<'a, T: Dtype> Tensor<'a, T> {
                 None
             };
             Tensor {
-                shape: vec![1],
+                shape: vec![],
                 data: vec![data],
                 grad: grad,
                 requires_grad: REQUIRES_GRAD,
@@ -134,33 +134,54 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 
 // Accessors
 impl<'a, T: Dtype> Tensor<'a, T> {
+    fn rank(&self) -> usize {
+        self.shape.len()
+    }
+
+    pub fn get(&self, mut indices: Vec<usize>) -> Tensor<'a, T> {
+        if indices.len() > self.rank() {
+            panic!("Cannot index into a rank-{} tensor with {:?}. For a rank-0 tensor, call item() instead",
+                self.rank(), indices);
+        }
+
+        let num_indices = indices.len();
+
+        // The start position is the indices vec, extended to the length of the shape vector with 0s
+        indices.resize(self.rank(), 0);
+        let first_pos = self.array_pos(&indices);
+
+        // The last position is the indices vec with the new zeros replaced by each dimension's respective maximum
+        for i in num_indices..self.rank() {
+            indices[i] = self.shape[i] - 1;
+        }
+
+        let last_pos = self.array_pos(&indices);
+
+        // TODO Copying here has grave performance implications for very large tensors, as are quite common in machine
+        // learning applications. Some better approaches:
+        //  - Wrap data in a RefCell<> and maybe an RC<>, and have the tensor returned here refer to the same underlying
+        //  memory
+        //  - Rather something other than a Tensor here (sort of like String and str)
+        Tensor::new(self.shape[num_indices..self.rank()].to_vec(), self.data[first_pos..last_pos+1].to_vec())
+    }
+
+    pub fn item(&self) -> T {
+        if self.rank() == 0 || self.shape.iter().product::<usize>() == 1 {
+            self.data[0]
+        }
+        else {
+            panic!("Cannot call item() on a rank-{} tensor", self.rank());
+        }
+
+    }
+
     pub fn element(&self, indices: Vec<usize>) -> T {
-        if indices.len() != self.shape.len() {
-            panic!("Cannot index into a {}-rank tensor with {:?}.", self.shape.len(), indices);
-        }
-
-        for i in 0..indices.len() {
-            if indices[i] >= self.shape[i] {
-                panic!("Index {} ({}) is out of bounds for shape {:?}", i, indices[i], self.shape);
-            }
-        }
-
-        let pos = indices.iter().zip(self.shape.iter()).fold(0, |acc, (&index, &dim)| acc * dim + index);
+        let pos = self.array_pos(&indices);
         self.data[pos]
     }
 
     pub fn set_element(&mut self, indices: Vec<usize>, value: T) {
-        if indices.len() != self.shape.len() {
-            panic!("Cannot index into a {}-rank tensor with {:?}.", self.shape.len(), indices);
-        }
-
-        for i in 0..indices.len() {
-            if indices[i] >= self.shape[i] {
-                panic!("Index {} ({}) is out of bounds for shape {:?}", i, indices[i], self.shape);
-            }
-        }
-
-        let pos = indices.iter().zip(self.shape.iter()).fold(0, |acc, (&index, &dim)| acc * dim + index);
+        let pos = self.array_pos(&indices);
         self.data[pos] = value;
     }
 
@@ -187,6 +208,21 @@ impl<'a, T: Dtype> Tensor<'a, T> {
             // If the tensor doesn't need a grad, we can get rid of the one we had
             self.grad = None;
         }
+    }
+
+    // Given the coordinates of an individual element, return its position within the backing array.
+    fn array_pos(&self, indices: &Vec<usize>) -> usize {
+        if indices.len() != self.rank() {
+            panic!("Cannot index into a rank-{} tensor with {:?}.", self.rank(), indices);
+        }
+
+        for i in 0..indices.len() {
+            if indices[i] >= self.shape[i] {
+                panic!("Index {} ({}) is out of bounds for shape {:?}", i, indices[i], self.shape);
+            }
+        }
+
+        indices.iter().zip(self.shape.iter()).fold(0, |acc, (&index, &dim)| acc * dim + index)
     }
 }
 
@@ -221,11 +257,6 @@ impl<'a, T: Dtype> Tensor<'a, T> {
             // TODO: I'd like to handle this more nicely, by printing the tensor in 2D blocks, the way PyTorch does
             _ => { writeln!(f, " {:?}: {:?}", shape, vec) }
         }
-    }
-
-    fn canary(&self, exp: T) -> T {
-        let value = self.data[0];
-        value.pow(exp) * value.exp()
     }
 }
 impl<'a, T: Dtype> Display for Tensor<'a, T> {
@@ -325,8 +356,8 @@ impl<'a, T: Dtype> Add<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
         res
     }
 }
-// TODO I think there's probably a way to implement a non-borrowing overloads, but I'd only bother if I can leverage
-// the borrowing versions; I don't want to duplicate code
+// TODO I think there's probably a way to implement a non-borrowing operator overloads, but I'd only bother if I can
+// leverage the borrowing versions; I don't want to duplicate code
 
 #[derive(Debug, Default)]
 struct BackPropCtx<'a, T> {
@@ -341,23 +372,25 @@ mod constructor_tests {
     #[test]
     fn new_0d() {
         let actual = Tensor::new_0d(1i8);
-        assert_eq!(actual.shape, vec![1]);
+        assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![1i8]);
+        assert_eq!(actual.item(), 1i8);
 
-        let actual = Tensor::new_0d(0_i16);
-        assert_eq!(actual.shape, vec![1]);
-        assert_eq!(actual.data, vec![0_i16]);
+        let actual = Tensor::new_0d(0i16);
+        assert_eq!(actual.shape, vec![]);
+        assert_eq!(actual.data, vec![0i16]);
+        assert_eq!(actual.item(), 0i16);
         
         let actual = Tensor::new_0d(-3);
-        assert_eq!(actual.shape, vec![1]);
+        assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![-3]);
 
-        let actual = Tensor::new_0d(1.0_f32);
-        assert_eq!(actual.shape, vec![1]);
-        assert_eq!(actual.data, vec![1.0_f32]);
+        let actual = Tensor::new_0d(1.0f32);
+        assert_eq!(actual.shape, vec![]);
+        assert_eq!(actual.data, vec![1.0f32]);
 
         let actual = Tensor::new_0d(-1.5);
-        assert_eq!(actual.shape, vec![1]);
+        assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![-1.5]);
     }
 
@@ -367,9 +400,9 @@ mod constructor_tests {
         assert_eq!(empty.shape, vec![0]);
         assert_eq!(empty.data.len(), 0);
 
-        let actual = Tensor::new_1d(vec![1.0_f32, 2.0_f32, 3.0_f32]);
+        let actual = Tensor::new_1d(vec![1.0f32, 2.0f32, 3.0f32]);
         assert_eq!(actual.shape, vec![3]);
-        assert_eq!(actual.data, vec![1.0_f32, 2.0_f32, 3.0_f32]);
+        assert_eq!(actual.data, vec![1.0f32, 2.0f32, 3.0f32]);
     }
 
     #[test]
@@ -530,6 +563,34 @@ mod constructor_tests {
 #[cfg(test)]
 mod accessor_tests {
     use crate::Tensor;
+
+    // TODO Rank tests
+
+    #[test]
+    fn get() {
+        let d4 = Tensor::new(vec![2,3,4,5], (0..120).map(|i| i as i32).collect());
+
+        // Naming assumes NCWH
+        for n in 0..d4.shape[0] {
+            let d3 = d4.get(vec![n]);
+            for c in 0..d4.shape[1] {
+                let d2 = d3.get(vec![c]);
+                for h in 0..d4.shape[2] {
+                    let d1 = d2.get(vec![h]);
+                    for w in 0..d4.shape[3] {
+                        let d0 = d1.get(vec![w]);
+                        let expected = n * d4.shape.iter().skip(1).product::<usize>() +
+                            c * d4.shape.iter().skip(2).product::<usize>() +
+                            h * d4.shape.iter().skip(3).product::<usize>() +
+                            w;
+                        assert_eq!(d0.item() as usize, expected);
+                        assert_eq!(d4.get(vec![n, c, h, w]).item() as usize, expected);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn grad_accessor() {
         // 0d
@@ -549,14 +610,13 @@ mod accessor_tests {
 
     #[test]
     fn element_accessor() {
-        // 0D
         let mut d0 = Tensor::new_0d(1);
         let mut d1 = Tensor::new_1d((1..11).collect());
         let mut d2 = Tensor::new(vec![3,3],(0..9).map(|x| x as f32).collect());
         let mut d3 = Tensor::new(vec![3,3,3],(0..27).map(|x| x as f32).collect());
         let mut d4 = Tensor::new(vec![3,3,3,3],(0..81).map(|x| x as f32).collect());
 
-        assert_eq!(d0.element(vec![0]), 1);
+        assert_eq!(d0.element(vec![]), 1);
         assert_eq!(d1.element(vec![1]), 2);
         assert_eq!(d1.element(vec![9]), 10);
         assert_eq!(d2.element(vec![0,1]), 1.0);
@@ -569,7 +629,7 @@ mod accessor_tests {
         assert_eq!(d4.element(vec![1,1,1,0]), 39.0);
         assert_eq!(d4.element(vec![2,0,0,2]), 56.0);
 
-        d0.set_element(vec![0], 0);
+        d0.set_element(vec![], 0);
         d1.set_element(vec![1], 0);
         d1.set_element(vec![9], 0);
         d2.set_element(vec![0,1], 0.0);
@@ -582,7 +642,7 @@ mod accessor_tests {
         d4.set_element(vec![1,1,1,0], 0.0);
         d4.set_element(vec![2,0,0,2], 0.0);
 
-        assert_eq!(d0.element(vec![0]), 0);
+        assert_eq!(d0.element(vec![]), 0);
         assert_eq!(d1.element(vec![1]), 0);
         assert_eq!(d1.element(vec![9]), 0);
         assert_eq!(d2.element(vec![0,1]), 0.0);
@@ -595,7 +655,7 @@ mod accessor_tests {
         assert_eq!(d4.element(vec![1,1,1,0]), 0.0);
         assert_eq!(d4.element(vec![2,0,0,2]), 0.0);
 
-        d0.increment_element(vec![0]);
+        d0.increment_element(vec![]);
         d1.increment_element(vec![1]);
         d1.increment_element(vec![9]);
         d2.increment_element(vec![0,1]);
@@ -608,7 +668,7 @@ mod accessor_tests {
         d4.increment_element(vec![1,1,1,0]);
         d4.increment_element(vec![2,0,0,2]);
 
-        assert_eq!(d0.element(vec![0]), 1);
+        assert_eq!(d0.element(vec![]), 1);
         assert_eq!(d1.element(vec![1]), 1);
         assert_eq!(d1.element(vec![9]), 1);
         assert_eq!(d2.element(vec![0,1]), 1.0);
@@ -645,9 +705,9 @@ mod operator_tests {
     fn add_with_grad() {
         unsafe {REQUIRES_GRAD = true;}
         // 0d
-        let a = Tensor::new(vec![1], vec![5.0_f32]);
-        let b = Tensor::new(vec![1], vec![6.0_f32]);
-        let expected = vec![11.0_f32];
+        let a = Tensor::new(vec![1], vec![5.0f32]);
+        let b = Tensor::new(vec![1], vec![6.0f32]);
+        let expected = vec![11.0f32];
         check_add(&a, &b, expected);
 
         // 1d

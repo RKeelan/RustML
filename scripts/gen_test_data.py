@@ -50,6 +50,21 @@ def generate_get_tests():
     print(f"b[1,1,1,0]={c[1,1,1,0]}")
     print(f"b[2,0,0,2]={c[2,0,0,2]}")
 
+def generate_idx_test():
+    d4 = torch.tensor(list(range(120))).reshape(2,3,4,5)
+    for n in range(2):
+        d3 = d4[n]
+        for c in range(3):
+            d2 = d3[c]
+            for h in range(4):
+                d1 = d2[h]
+                for w in range(5):
+                    d0 = d1[w]
+                    print(f"d4[{n},{c},{h},{w}]={d0.item()}")
+                    assert d0.item() == d4[n,c,h,w].item()
+
+
+
 def main(args):
     parser = argparse.ArgumentParser(description="Generate test data for the Rust ml package")
     parser.add_argument("test")
@@ -59,6 +74,8 @@ def main(args):
         generate_add_tests()
     elif args.test == "get":
         generate_get_tests()
+    elif args.test == "idx":
+        generate_idx_test()
     else:
         print(f"Unknown test: {args.test}")
 
