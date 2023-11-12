@@ -282,7 +282,7 @@ impl<'a, T> Hash for Tensor<'a, T> {
     }
 }
 
-// Autograd
+// Automatic differentiation
 impl<'a, T: Dtype> Tensor<'a, T> {
     fn update_grad(grad: &mut Vec<T>, updates: &Vec<T>) {
         for (g, u) in grad.iter_mut().zip(updates.iter()) {
