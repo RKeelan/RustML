@@ -63,7 +63,38 @@ def generate_idx_test():
                     print(f"d4[{n},{c},{h},{w}]={d0.item()}")
                     assert d0.item() == d4[n,c,h,w].item()
 
+def divide(name, a, b):
+    c = a / b
+    c.backward(torch.ones(c.shape))
+    print()
+    print(f"        // {name}")
+    print(f"        let a = Tensor::new(vec!{list(a.size())}, vec!{a.flatten().tolist()});")
+    print(f"        let b = Tensor::new(vec!{list(b.size())}, vec!{b.flatten().tolist()});")
+    print(f"        let expected_data = vec!{c.flatten().tolist()};")
+    print(f"        let lhs_expected_grad = Some(vec!{a.grad.flatten().tolist()});")
+    print(f"        let rhs_expected_grad = Some(vec!{b.grad.flatten().tolist()});")
+    print(f"        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);")
 
+def generate_div_tests():
+    divide("0d",
+        torch.tensor([5.0], requires_grad=True, dtype=torch.float64), 
+        torch.tensor([6.0], requires_grad=True, dtype=torch.float64))
+    
+    divide("1d",
+        torch.tensor([1.0, -1.0, 2.0], requires_grad=True, dtype=torch.float64), 
+        torch.tensor([2.0, 3.0, -6.0], requires_grad=True, dtype=torch.float64))
+    
+    a = torch.FloatTensor(list(range(5,9))).type(torch.DoubleTensor).reshape(2,2); a.requires_grad=True
+    b = torch.FloatTensor(list(range(1,12,3))).type(torch.DoubleTensor).reshape(2,2); b.requires_grad=True
+    divide("2d", a, b)
+    
+    a = torch.FloatTensor(list(range(0,8))).type(torch.DoubleTensor).reshape(2,2,2); a.requires_grad=True
+    b = torch.FloatTensor(list(range(4,20,2))).type(torch.DoubleTensor).reshape(2,2,2); b.requires_grad=True
+    divide("3d", a, b)
+    
+    a = torch.FloatTensor(list(range(0,16))).type(torch.DoubleTensor).reshape(2,2,2,2); a.requires_grad=True
+    b = torch.FloatTensor(list(range(8,40,2))).type(torch.DoubleTensor).reshape(2,2,2,2); b.requires_grad=True
+    divide("4d", a, b)
 
 def main(args):
     parser = argparse.ArgumentParser(description="Generate test data for the Rust ml package")
@@ -72,6 +103,8 @@ def main(args):
 
     if args.test == "add":
         generate_add_tests()
+    elif args.test == "div":
+        generate_div_tests()
     elif args.test == "get":
         generate_get_tests()
     elif args.test == "idx":

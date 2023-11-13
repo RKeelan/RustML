@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::Add;
+use std::ops::{Add, Div};
 
 use derivative::Derivative;
 
@@ -275,6 +276,7 @@ impl<'a, T: Dtype> Display for Tensor<'a, T> {
             writeln!(f, "Grad:")?;
             Tensor::print_vec_as_tensor(&self.shape, &grad.borrow(), f)?;
         }
+        // TODO Also print the DType
         Ok(())
     }
 }
@@ -335,13 +337,15 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 }
 
 // Operators
+// TODO I think there's probably a way to implement a non-borrowing operator overloads, but I'd only bother if I can
+// leverage the borrowing versions; I don't want to duplicate code
 impl<'a, T: Dtype> Tensor<'a, T> {
     fn add_bwd(&self, ctx: &BackPropCtx<'a, T>) {
         let updates = self.grad.as_ref().expect("Self gradient was None during add back propagation.").borrow();
         let mut lhs_grad = ctx.lhs.expect("LHS Tensor was none during add back propagation")
-            .grad.as_ref().expect("LHS gradient was None during back propagation.").borrow_mut();
+            .grad.as_ref().expect("LHS gradient was None during add back propagation.").borrow_mut();
         let mut rhs_grad = ctx.rhs.expect("RHS Tensor was none during add back propagation")
-            .grad.as_ref().expect("RHS gradient was None during back propagation.").borrow_mut();
+            .grad.as_ref().expect("RHS gradient was None during add back propagation.").borrow_mut();
 
         Tensor::update_grad(&mut lhs_grad, &updates);
         Tensor::update_grad(&mut rhs_grad, &updates);
@@ -364,8 +368,47 @@ impl<'a, T: Dtype> Add<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
         res
     }
 }
-// TODO I think there's probably a way to implement a non-borrowing operator overloads, but I'd only bother if I can
-// leverage the borrowing versions; I don't want to duplicate code
+impl<'a, T: Dtype> Tensor<'a, T> {
+    fn div_bwd(&self, ctx: &BackPropCtx<'a, T>) {
+        let self_grad = self.grad.as_ref().expect("Self gradient was None during dev back propagation.").borrow();
+        // Given y - LHS / RHS; LHS is the numerator and RHS is the denominator
+        let numerator_data = &ctx.lhs.expect("LHS (numerator) Tensor was none during dev back propagation").data;
+        let denominator = &ctx.rhs.expect("RHS (denominator) Tensor was none during dev back propagation").data;
+
+        let two = T::one() + T::one();
+        let numerator_updates = denominator.iter().zip(self_grad.iter()).map(|(&r, &g)| g / r).collect();
+        let denominator_updates = numerator_data.iter().zip(denominator.iter()).zip(self_grad.iter())
+            .map(|((&l, &r), &g)| {
+                let result = -(l / r.pow(two)) * g;
+                result
+        }).collect();
+        
+        let mut numerator_grad = ctx.lhs.expect("LHS (numerator) Tensor was none during dev back propagation")
+            .grad.as_ref().expect("LHS (numerator) gradient was None during add back propagation.").borrow_mut();
+        let mut denominator_grad = ctx.rhs.expect("RHS (denominator) Tensor was none during dev back propagation")
+            .grad.as_ref().expect("RHS (denominator) gradient was None during add back propagation.").borrow_mut();
+
+        Tensor::update_grad(&mut numerator_grad, &numerator_updates);
+        Tensor::update_grad(&mut denominator_grad, &denominator_updates);
+    }
+}
+impl<'a, T: Dtype> Div<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
+    type Output = Tensor<'a, T>;
+    fn div(self, rhs: &'a Tensor<'a, T>) -> Tensor<'a, T> {
+        assert!(self.check_shape(rhs), "Cannot divide tensors with different shapes ({:?} !+ {:?}",
+            self.shape, rhs.shape);
+        let res_data = self.data.iter().zip(rhs.data.iter()).map(|(&a, &b)| a / b).collect();
+        let mut res = Tensor::new(self.shape.clone(), res_data);
+        if self.requires_grad {
+            res.back_prop_fn = Some(Tensor::div_bwd);
+            res.back_prop_ctx = Some(BackPropCtx { lhs: Some(self), rhs: Some(rhs) });
+        }
+        else {
+            res.requires_grad = false;
+        }
+        res
+    }
+}
 
 #[derive(Debug, Default)]
 struct BackPropCtx<'a, T> {
@@ -692,7 +735,7 @@ mod accessor_tests {
 }
 
 #[cfg(test)]
-mod operator_tests {
+mod add_tests {
     use crate::error::TensorError;
     use crate::Tensor;
     use crate::tensor::Dtype;
@@ -772,7 +815,124 @@ mod operator_tests {
         // 0d
         let a = Tensor::new(vec![1], vec![5.0]);
         let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
-        let expected = vec![7.0, 3.0, -6.0];
-        check_add(&a, &b, expected);
+        let _ = &a + &b;
+    }
+}
+
+#[cfg(test)]
+mod div_tests {
+    use crate::error::TensorError;
+    use crate::Tensor;
+    use crate::tensor::Dtype;
+    use crate::tensor::REQUIRES_GRAD;
+
+    fn assert_almost_equal_vec<T: Dtype>(actual: &Vec<T>, expected: &Vec<T>) {
+        actual.iter().zip(expected.iter()).for_each(|(a, e)| {
+            if !T::almost_equal(a, e) {
+                panic!("actual: {:?}, expected: {:?}, epsilon: {:?}, diff: {:?}, expected*epsilon: {:?}",
+                    a, e, T::epsilon(), (*a - *e).abs(), T::epsilon() * *e);
+            }
+        });
+    }
+
+    fn check_div<'a, T: Dtype>(
+        lhs: &'a Tensor<'a, T>,
+        rhs: &'a Tensor<'a, T>,
+        expected_data: Vec<T>,
+        lhs_expected_grad: Option<Vec<T>>,
+        rhs_expected_grad: Option<Vec<T>>) {
+        let actual = lhs / rhs;
+        assert_almost_equal_vec(&actual.data, &expected_data);
+
+        actual.bwd().unwrap();
+        let lhs_grad = lhs.grad.as_ref().map(|refcell_vec| refcell_vec.borrow().clone());
+        let rhs_grad = rhs.grad.as_ref().map(|refcell_vec| refcell_vec.borrow().clone());
+        assert_almost_equal_vec(&lhs_grad.unwrap(), &lhs_expected_grad.unwrap());
+        assert_almost_equal_vec(&rhs_grad.unwrap(), &rhs_expected_grad.unwrap());
+    }
+
+    #[test]
+    fn div_with_grad() {
+        unsafe {REQUIRES_GRAD = true;}
+        // 0d
+        let a = Tensor::new(vec![1], vec![5.0]);
+        let b = Tensor::new(vec![1], vec![6.0]);
+        let expected_data = vec![0.8333333333333334];
+        let lhs_expected_grad = Some(vec![0.16666666666666666]);
+        let rhs_expected_grad = Some(vec![-0.1388888888888889]);
+        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+
+        // 1d
+        let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0]);
+        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
+        let expected_data = vec![0.5, -0.3333333333333333, -0.3333333333333333];
+        let lhs_expected_grad = Some(vec![0.5, 0.3333333333333333, -0.16666666666666666]);
+        let rhs_expected_grad = Some(vec![-0.25, 0.1111111111111111, -0.05555555555555555]);
+        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+
+        // 2d
+        let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]);
+        let b = Tensor::new(vec![2, 2], vec![1.0, 4.0, 7.0, 10.0]);
+        let expected_data = vec![5.0, 1.5, 1.0, 0.8];
+        let lhs_expected_grad = Some(vec![1.0, 0.25, 0.14285714285714285, 0.1]);
+        let rhs_expected_grad = Some(vec![-5.0, -0.375, -0.14285714285714285, -0.08]);
+        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+
+        // 3d
+        let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        let b = Tensor::new(vec![2, 2, 2], vec![4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]);
+        let expected_data = vec![0.0, 0.16666666666666666, 0.25, 0.3, 0.3333333333333333, 0.35714285714285715, 0.375, 0.3888888888888889];
+        let lhs_expected_grad = Some(vec![0.25, 0.16666666666666666, 0.125, 0.1, 0.08333333333333333, 0.07142857142857142, 0.0625, 0.05555555555555555]);
+        let rhs_expected_grad = Some(vec![-0.0, -0.027777777777777776, -0.03125, -0.03, -0.027777777777777776, -0.025510204081632654, -0.0234375, -0.021604938271604937]);
+        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+
+        // 4d
+        let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+        let b = Tensor::new(vec![2, 2, 2, 2], vec![8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0]);
+        let expected_data = vec![0.0, 0.1, 0.16666666666666666, 0.21428571428571427, 0.25, 0.2777777777777778, 0.3, 0.3181818181818182, 0.3333333333333333, 0.34615384615384615, 0.35714285714285715, 0.36666666666666664, 0.375, 0.38235294117647056, 0.3888888888888889, 0.39473684210526316];
+        let lhs_expected_grad = Some(vec![0.125, 0.1, 0.08333333333333333, 0.07142857142857142, 0.0625, 0.05555555555555555, 0.05, 0.045454545454545456, 0.041666666666666664, 0.038461538461538464, 0.03571428571428571, 0.03333333333333333, 0.03125, 0.029411764705882353, 0.027777777777777776, 0.02631578947368421]);
+        let rhs_expected_grad = Some(vec![-0.0, -0.01, -0.013888888888888888, -0.015306122448979591, -0.015625, -0.0154320987654321, -0.015, -0.014462809917355372, -0.013888888888888888, -0.013313609467455622, -0.012755102040816327, -0.012222222222222221, -0.01171875, -0.011245674740484428, -0.010802469135802469, -0.01038781163434903]);
+        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+    }
+    #[test]
+    fn div_no_grad() {
+        unsafe {REQUIRES_GRAD = false;}
+        // 0d
+        let a = Tensor::new(vec![1], vec![5.0]);
+        let b = Tensor::new(vec![1], vec![6.0]);
+        let actual = &a / &b;
+        let expected = vec![5.0/6.0];
+        assert_eq!(actual.data, expected);
+        assert!(a.grad.is_none());
+        assert!(b.grad.is_none());
+        assert_eq!(actual.bwd(), Err(TensorError::NoGrad));
+    }
+    #[test]
+    fn div_int() {
+        unsafe {REQUIRES_GRAD = false;}
+        // 0d
+        let a = Tensor::new(vec![1], vec![50.0]);
+        let b = Tensor::new(vec![1], vec![65.0]);
+        let actual = &a / &b;
+        let expected = vec![50.0/65.0];
+        assert_eq!(actual.data, expected);
+        assert!(a.grad.is_none());
+        assert!(b.grad.is_none());
+        assert_eq!(actual.bwd(), Err(TensorError::NoGrad));
+    }
+    #[test]
+    #[should_panic(expected = "")]
+    fn div_shape_mismatch() {
+        // 0d
+        let a = Tensor::new(vec![1], vec![5.0]);
+        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
+        let _ = &a / &b;
+    }
+}
+
+impl<'a, T: Dtype> Tensor<'a, T> {
+    fn _canary(&self, exp: T) -> T {
+        let value = self.data[0];
+        value.pow(exp) * value.exp()
     }
 }
