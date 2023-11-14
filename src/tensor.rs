@@ -307,11 +307,15 @@ impl<'a, T: Dtype> Tensor<'a, T> {
         tensor: &'b Tensor<'a, T>) {
         if !visited.contains(tensor) {
             visited.insert(tensor);
-            if let Some(lhs) = tensor.back_prop_ctx.as_ref().map(|ctx| ctx.rhs.unwrap()) {
-                Tensor::visit(topological_ordering, visited, lhs);
+            if let Some(ctx) = tensor.back_prop_ctx.as_ref() {
+                if let Some(lhs) = ctx.rhs {
+                    Tensor::visit(topological_ordering, visited, lhs);
+                }
             }
-            if let Some(rhs) = tensor.back_prop_ctx.as_ref().map(|ctx| ctx.rhs.unwrap()) {
-                Tensor::visit(topological_ordering, visited, rhs);
+            if let Some(ctx) = tensor.back_prop_ctx.as_ref(){
+                if let Some(rhs) = ctx.rhs {
+                    Tensor::visit(topological_ordering, visited, rhs);
+                }
             }
             topological_ordering.push(&tensor);
         }
@@ -403,6 +407,31 @@ impl<'a, T: Dtype> Div<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
         if self.requires_grad {
             res.back_prop_fn = Some(Tensor::div_bwd);
             res.back_prop_ctx = Some(BackPropCtx { lhs: Some(self), rhs: Some(rhs) });
+        }
+        else {
+            res.requires_grad = false;
+        }
+        res
+    }
+}
+
+// Functions
+impl<'a, T: Dtype> Tensor<'a, T> {
+    fn sum_bwd(&self, ctx: &BackPropCtx<'a, T>) {
+        let updates = self.grad.as_ref().expect("Self gradient was None during sum back propagation.").borrow();
+        assert!(updates.len() == 1, "Sum() should result in a scalar tensor");
+        let mut lhs_grad = ctx.lhs.expect("LHS Tensor was none during sum back propagation")
+            .grad.as_ref().expect("LHS gradient was None during sum back propagation.").borrow_mut();
+        let updates = vec![updates[0]; lhs_grad.len()];
+
+        Tensor::update_grad(&mut lhs_grad, &updates);
+    }
+    pub fn sum(&'a self) -> Self {
+        let res_data: T = self.data.iter().map(|x| *x).sum();
+        let mut res = Tensor::new_0d(res_data);
+        if self.requires_grad {
+            res.back_prop_fn = Some(Tensor::sum_bwd);
+            res.back_prop_ctx = Some(BackPropCtx { lhs: Some(&self), rhs: None });
         }
         else {
             res.requires_grad = false;
@@ -840,7 +869,6 @@ mod add_tests {
     #[test]
     #[should_panic(expected = "")]
     fn add_shape_mismatch() {
-        // 0d
         let a = Tensor::new(vec![1], vec![5.0]);
         let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
         let _ = &a + &b;
@@ -955,6 +983,63 @@ mod div_tests {
         let a = Tensor::new(vec![1], vec![5.0]);
         let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
         let _ = &a / &b;
+    }
+}
+
+#[cfg(test)]
+mod sum_test {
+    use crate::error::TensorError;
+    use crate::Tensor;
+    use crate::tensor::Dtype;
+    use crate::tensor::REQUIRES_GRAD;
+
+    fn check_sum<'a, T: Dtype>(a: &'a Tensor<'a, T>, expected_data: T) {
+        let actual = a.sum();
+        assert_eq!(actual.item(), expected_data);
+
+        actual.bwd().unwrap();
+        let grad = a.grad.as_ref().unwrap().borrow();
+        assert_eq!(*grad, vec![T::one(); a.shape.iter().product()]);
+    }
+
+    #[test]
+    fn sum_with_grad() {
+        unsafe {REQUIRES_GRAD = true;}
+        // 0d
+        let a = Tensor::new(vec![1], vec![5.0]);
+        let expected_data = a.data.iter().sum();
+        check_sum(&a, expected_data);
+
+        // 1d
+        let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0]);
+        let expected_data = a.data.iter().sum();
+        check_sum(&a, expected_data);
+
+        // 2d
+        let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]);
+        let expected_data = a.data.iter().sum();
+        check_sum(&a, expected_data);
+
+        // 3d
+        let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        let expected_data = a.data.iter().sum();
+        check_sum(&a, expected_data);
+
+        // 4d
+        let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+        let expected_data = a.data.iter().sum();
+        check_sum(&a, expected_data);
+    }
+    #[test]
+    fn sum_no_grad() {
+        unsafe {REQUIRES_GRAD = false;}
+        // 0d
+        let a = Tensor::new(vec![1], vec![5.0]);
+        let actual = a.sum();
+        let expected = 5.0;
+        assert_eq!(actual.item(), expected);
+        assert!(a.grad.is_none());
+        assert_eq!(actual.bwd(), Err(TensorError::NoGrad));
     }
 }
 

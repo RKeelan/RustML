@@ -2,8 +2,8 @@ use std::fmt::{Debug, Display};
 
 use num_traits::Num;
 
-pub trait Dtype: Num + Display + Debug + Copy + std::ops::Neg<Output = Self> + std::ops::AddAssign + std::clone::Clone
-    + std::cmp::PartialOrd {
+pub trait Dtype: Num + Display + Debug + Copy + std::iter::Sum + std::ops::Neg<Output = Self> + std::ops::AddAssign +
+    std::clone::Clone + std::cmp::PartialOrd {
     // TODO Add comments
     fn pow(&self, exp: Self) -> Self;
     fn exp(&self) -> Self;
