@@ -33,7 +33,7 @@ pub struct Tensor<'a, T> {
 
 // Constructors
 impl<'a, T: Dtype> Tensor<'a, T> {
-    pub fn new_0d(data: T) -> Tensor<'a, T> {
+    pub fn new_0d(data: T) -> Self {
         unsafe {
             let grad = if REQUIRES_GRAD {
                 Some(RefCell::new(vec![T::zero(); 1]))
@@ -52,7 +52,7 @@ impl<'a, T: Dtype> Tensor<'a, T> {
         }
     }
 
-    pub fn new_1d(data: Vec<T>) -> Tensor<'a, T> {
+    pub fn new_1d(data: Vec<T>) -> Self {
         let length = data.len();
         unsafe {
             let grad = if REQUIRES_GRAD {
@@ -72,7 +72,7 @@ impl<'a, T: Dtype> Tensor<'a, T> {
         }
     }
 
-    pub fn new_2d(data: Vec<Vec<T>>) -> Tensor<'a, T> {
+    pub fn new_2d(data: Vec<Vec<T>>) -> Self {
         // Check for jaggedness
         let row_len = data.iter().map(|v| v.len()).collect::<Vec<usize>>();
         assert!(row_len.iter().all(|v| v == &row_len[0]), "Jagged matrix provided to new_2d");
@@ -101,7 +101,7 @@ impl<'a, T: Dtype> Tensor<'a, T> {
         }
     }
     
-    pub fn new(shape: Vec<usize>, data: Vec<T>) -> Tensor<'a, T> {
+    pub fn new(shape: Vec<usize>, data: Vec<T>) -> Self {
         let length = data.len();
         assert_eq!(shape.iter().product::<usize>(), length);
         unsafe {
@@ -122,12 +122,12 @@ impl<'a, T: Dtype> Tensor<'a, T> {
         }
     }
 
-    pub fn zeros(shape: Vec<usize>) -> Tensor<'a, T> {
+    pub fn zeros(shape: Vec<usize>) -> Self {
         let data = vec![T::zero(); shape.iter().product()];
         Tensor::new(shape, data)
     }
 
-    pub fn ones(shape: Vec<usize>) -> Tensor<'a, T> {
+    pub fn ones(shape: Vec<usize>) -> Self {
         let data = vec![T::one(); shape.iter().product()];
         Tensor::new(shape, data)
     }
@@ -147,7 +147,7 @@ impl<'a, T: Dtype> Tensor<'a, T> {
         self.shape.len()
     }
 
-    pub fn get(&self, mut indices: Vec<usize>) -> Tensor<'a, T> {
+    pub fn get(&self, mut indices: Vec<usize>) -> Self {
         if indices.len() > self.rank() {
             panic!("Cannot index into a rank-{} tensor with {:?}. For a rank-0 tensor, call item() instead",
                 self.rank(), indices);
@@ -787,7 +787,7 @@ mod add_tests {
     }
     #[test]
     fn add_no_grad() {
-        // 0d
+        unsafe {REQUIRES_GRAD = false;}
         let a = Tensor::new(vec![1], vec![5.0]);
         let b = Tensor::new(vec![1], vec![6.0]);
         let actual = &a + &b;
@@ -799,7 +799,7 @@ mod add_tests {
     }
     #[test]
     fn add_int() {
-        // 0d
+        unsafe {REQUIRES_GRAD = false;}
         let a = Tensor::new(vec![1], vec![50]);
         let b = Tensor::new(vec![1], vec![60]);
         let actual = &a + &b;
