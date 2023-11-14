@@ -82,9 +82,10 @@ impl<'a, T: Dtype> Tensor<'a, T> {
             0 => vec![0, 0],
             _ => vec![data.len(), row_len[0]]
         };
+        let data: Vec<T> = data.into_iter().flatten().collect();
         unsafe {
             let grad = if REQUIRES_GRAD {
-                Some(RefCell::new(vec![T::zero(); length]))
+                Some(RefCell::new(vec![T::zero(); data.len()]))
             }
             else {
                 None
@@ -92,7 +93,7 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 
             Tensor {
                 shape: shape,
-                data: data.into_iter().flatten().collect(),
+                data: data,
                 grad: grad,
                 requires_grad: REQUIRES_GRAD,
                 back_prop_fn: None,
@@ -419,55 +420,71 @@ struct BackPropCtx<'a, T> {
 #[cfg(test)]
 mod constructor_tests {
     use crate::Tensor;
+    use crate::tensor::REQUIRES_GRAD;
 
     #[test]
     fn new_0d() {
+        unsafe {REQUIRES_GRAD = false;}
         let actual = Tensor::new_0d(1i8);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![1i8]);
         assert_eq!(actual.item(), 1i8);
+        assert!(actual.grad.is_none());
 
         let actual = Tensor::new_0d(0i16);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![0i16]);
         assert_eq!(actual.item(), 0i16);
+        assert!(actual.grad.is_none());
         
+        unsafe {REQUIRES_GRAD = true;}
         let actual = Tensor::new_0d(-3);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![-3]);
+        assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
 
         let actual = Tensor::new_0d(1.0f32);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![1.0f32]);
+        assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
 
         let actual = Tensor::new_0d(-1.5);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![-1.5]);
+        assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
     }
 
     #[test]
     fn new_1d() {
+        unsafe {REQUIRES_GRAD = false;}
         let empty: Tensor<f32> = Tensor::new_1d(vec![]);
         assert_eq!(empty.shape, vec![0]);
         assert_eq!(empty.data.len(), 0);
+        assert!(empty.grad.is_none());
 
+        unsafe {REQUIRES_GRAD = true;}
         let actual = Tensor::new_1d(vec![1.0f32, 2.0f32, 3.0f32]);
         assert_eq!(actual.shape, vec![3]);
         assert_eq!(actual.data, vec![1.0f32, 2.0f32, 3.0f32]);
+        assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
     }
 
     #[test]
     fn new_2d() {
+        unsafe {REQUIRES_GRAD = false;}
         let empty: Tensor<f32> = Tensor::new_2d(vec![vec![]]);
         assert_eq!(empty.shape, vec![0,0]);
         assert_eq!(empty.data.len(), 0);
+        assert!(empty.grad.is_none());
 
+        unsafe {REQUIRES_GRAD = true;}
         let actual = Tensor::new_2d(vec![
             vec![1.0, 2.0, 3.0],
             vec![4.0, 5.0, 6.0]]
         );
         assert_eq!(actual.shape, vec![2,3]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
     }
     #[test]
     #[should_panic(expected = "")]
@@ -480,27 +497,33 @@ mod constructor_tests {
 
     #[test]
     fn new() {
+        unsafe {REQUIRES_GRAD = false;}
         let empty: Tensor<f64> = Tensor::new(vec![0,0,0], vec![]);
         assert_eq!(empty.shape, vec![0,0,0]);
         assert_eq!(empty.data.len(), 0);
+        assert!(empty.grad.is_none());
 
         // 0D
         let actual = Tensor::new(vec![1], vec![1.0]);
         assert_eq!(actual.shape, vec![1]);
         assert_eq!(actual.data, vec![1.0]);
+        assert!(actual.grad.is_none());
 
         // 1D
         let actual = Tensor::new(vec![3], vec![1.0, 2.0, 3.0]);
         assert_eq!(actual.shape, vec![3]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0]);
+        assert!(actual.grad.is_none());
 
         // 2D
+        unsafe {REQUIRES_GRAD = true;}
         let actual = Tensor::new(vec![2,3], vec![
             1.0, 2.0, 3.0,
             4.0, 5.0, 6.0
         ]);
         assert_eq!(actual.shape, vec![2,3]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
 
         let actual = Tensor::new(vec![3,2], vec![
             1.0, 2.0,
@@ -509,6 +532,7 @@ mod constructor_tests {
         ]);
         assert_eq!(actual.shape, vec![3,2]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
 
         // 3D
         let actual = Tensor::new(vec![2,3,2], vec![
@@ -522,6 +546,7 @@ mod constructor_tests {
         ]);
         assert_eq!(actual.shape, vec![2,3,2]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
         
         // 4D
         let actual = Tensor::new(vec![2,2,2,2], vec![
@@ -545,6 +570,7 @@ mod constructor_tests {
         assert_eq!(actual.shape, vec![2,2,2,2]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
                                      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]);
+        assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
 
         // TODO: Add more--for example, what about shape: [1,0,1]?
     }
@@ -614,6 +640,7 @@ mod constructor_tests {
 #[cfg(test)]
 mod accessor_tests {
     use crate::Tensor;
+    use crate::tensor::REQUIRES_GRAD;
 
     // TODO Rank tests
 
@@ -644,6 +671,7 @@ mod accessor_tests {
 
     #[test]
     fn grad_accessor() {
+        unsafe {REQUIRES_GRAD = false;}
         // 0d
         let mut tensor = Tensor::new(vec![1], vec![5.0]);
         assert!(!tensor.requires_grad());
