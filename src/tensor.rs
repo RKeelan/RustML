@@ -3,7 +3,6 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
-use std::ops::Add;
 use std::ops::{Add, Div};
 
 use derivative::Derivative;
@@ -11,11 +10,6 @@ use derivative::Derivative;
 use crate::Dtype;
 use crate::TensorError;
 
-
-// This is inspired by PyTorch's no_grad(), and is definitely not idiomatic Rust. If this were production code, I'd
-// probably just bite the bullet and make grad and no_grad versions of the constructors. But right now, it's just a
-// learning project, so I'm taking the lazy route.
-pub static mut REQUIRES_GRAD: bool = false;
 
 // TODO: Following PyTorch, disallow gradients for integer-based tensors
 
@@ -25,7 +19,6 @@ pub struct Tensor<'a, T> {
     shape: Vec<usize>,
     data: Vec<T>,
     grad: Option<RefCell<Vec<T>>>,
-    requires_grad: bool,
     #[derivative(Debug="ignore")]
     back_prop_fn: Option<fn(result: &Tensor<'a, T>, ctx: &BackPropCtx<'a, T>)>,
     back_prop_ctx: Option<BackPropCtx<'a, T>>,
@@ -33,104 +26,91 @@ pub struct Tensor<'a, T> {
 
 // Constructors
 impl<'a, T: Dtype> Tensor<'a, T> {
-    pub fn new_0d(data: T) -> Self {
-        unsafe {
-            let grad = if REQUIRES_GRAD {
-                Some(RefCell::new(vec![T::zero(); 1]))
-            }
-            else {
-                None
-            };
-            Tensor {
-                shape: vec![],
-                data: vec![data],
-                grad: grad,
-                requires_grad: REQUIRES_GRAD,
-                back_prop_fn: None,
-                back_prop_ctx: None,
-            }
+    // Without gradient
+    pub fn new_0d(data: T, requires_grad: bool) -> Self {
+        let grad = if requires_grad {
+            Some(RefCell::new(vec![T::zero(); 1]))
+        }
+        else {
+            None
+        };
+        Tensor {
+            shape: vec![],
+            data: vec![data],
+            grad: grad,
+            back_prop_fn: None,
+            back_prop_ctx: None,
         }
     }
 
-    pub fn new_1d(data: Vec<T>) -> Self {
+    pub fn new_1d(data: Vec<T>, requires_grad: bool) -> Self {
         let length = data.len();
-        unsafe {
-            let grad = if REQUIRES_GRAD {
-                Some(RefCell::new(vec![T::zero(); length]))
-            }
-            else {
-                None
-            };
-            Tensor {
-                shape: vec![data.len()],
-                data,
-                grad: grad,
-                requires_grad: REQUIRES_GRAD,
-                back_prop_fn: None,
-                back_prop_ctx: None,
-            }
+        let grad = if requires_grad {
+            Some(RefCell::new(vec![T::zero(); length]))
+        }
+        else {
+            None
+        };
+        Tensor {
+            shape: vec![data.len()],
+            data,
+            grad: grad,
+            back_prop_fn: None,
+            back_prop_ctx: None,
         }
     }
 
-    pub fn new_2d(data: Vec<Vec<T>>) -> Self {
+    pub fn new_2d(data: Vec<Vec<T>>, requires_grad: bool) -> Self {
         // Check for jaggedness
         let row_len = data.iter().map(|v| v.len()).collect::<Vec<usize>>();
         assert!(row_len.iter().all(|v| v == &row_len[0]), "Jagged matrix provided to new_2d");
 
-        let length = data.len();
         let shape = match row_len[0] {
             0 => vec![0, 0],
             _ => vec![data.len(), row_len[0]]
         };
         let data: Vec<T> = data.into_iter().flatten().collect();
-        unsafe {
-            let grad = if REQUIRES_GRAD {
-                Some(RefCell::new(vec![T::zero(); data.len()]))
-            }
-            else {
-                None
-            };
-
-            Tensor {
-                shape: shape,
-                data: data,
-                grad: grad,
-                requires_grad: REQUIRES_GRAD,
-                back_prop_fn: None,
-                back_prop_ctx: None,
-            }
+        let grad = if requires_grad {
+            Some(RefCell::new(vec![T::zero(); data.len()]))
+        }
+        else {
+            None
+        };
+        Tensor {
+            shape: shape,
+            data: data,
+            grad: grad,
+            back_prop_fn: None,
+            back_prop_ctx: None,
         }
     }
     
-    pub fn new(shape: Vec<usize>, data: Vec<T>) -> Self {
+    pub fn new(shape: Vec<usize>, data: Vec<T>, requires_grad: bool) -> Self {
         let length = data.len();
         assert_eq!(shape.iter().product::<usize>(), length);
-        unsafe {
-            let grad = if REQUIRES_GRAD {
-                Some(RefCell::new(vec![T::zero(); length]))
-            }
-            else {
-                None
-            };
-            Tensor {
-                shape,
-                data,
-                grad: grad,
-                requires_grad: REQUIRES_GRAD,
-                back_prop_fn: None,
-                back_prop_ctx: None,
-            }
+        let grad = if requires_grad {
+            Some(RefCell::new(vec![T::zero(); length]))
+        }
+        else {
+            None
+        };
+        Tensor {
+            shape,
+            data,
+            grad: grad,
+            back_prop_fn: None,
+            back_prop_ctx: None,
         }
     }
 
-    pub fn zeros(shape: Vec<usize>) -> Self {
+    pub fn zeros(shape: Vec<usize>, requires_grad: bool) -> Self {
         let data = vec![T::zero(); shape.iter().product()];
-        Tensor::new(shape, data)
+        Tensor::new(shape, data, requires_grad)
     }
 
-    pub fn ones(shape: Vec<usize>) -> Self {
+    pub fn ones(shape: Vec<usize>, requires_grad: bool) -> Self {
         let data = vec![T::one(); shape.iter().product()];
-        Tensor::new(shape, data)
+        Tensor::new(shape, data,requires_grad)
     }
 }
 
@@ -172,7 +152,8 @@ impl<'a, T: Dtype> Tensor<'a, T> {
         //  - Wrap data in a RefCell<> and maybe an RC<>, and have the tensor returned here refer to the same underlying
         //  memory
         //  - Rather something other than a Tensor here (sort of like String and str)
-        Tensor::new(self.shape[num_indices..self.rank()].to_vec(), self.data[first_pos..last_pos+1].to_vec())
+        Tensor::new(self.shape[num_indices..self.rank()].to_vec(), self.data[first_pos..last_pos+1].to_vec(),
+            self.requires_grad())
     }
 
     pub fn item(&self) -> T {
@@ -201,16 +182,15 @@ impl<'a, T: Dtype> Tensor<'a, T> {
     }
 
     pub fn requires_grad(&self) -> bool {
-        self.requires_grad
+        self.grad != None
     }
 
     pub fn set_requires_grad(&mut self, requires_grad: bool) {
-        if self.requires_grad == requires_grad {
+        if self.requires_grad() == requires_grad {
             // Idempotent function; return early
             return;
         }
 
-        self.requires_grad = requires_grad;
         if requires_grad {
             self.grad = Some(RefCell::new(vec![T::zero(); self.shape.iter().product()]));
         }
@@ -322,7 +302,7 @@ impl<'a, T: Dtype> Tensor<'a, T> {
     }
     
     pub fn bwd(&self) -> Result<(), TensorError> {
-        if !self.requires_grad {
+        if self.grad == None {
             return Err(TensorError::NoGrad);
         }
 
@@ -359,16 +339,14 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 impl<'a, T: Dtype> Add<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
     type Output = Tensor<'a, T>;
     fn add(self, rhs: &'a Tensor<'a, T>) -> Tensor<'a, T> {
-        assert!(self.check_shape(rhs), "Cannot add tensors with different shapes ({:?} !+ {:?}",
+        assert!(self.is_broadcastable(rhs), "Cannot add tensors with different shapes ({:?} !+ {:?}",
             self.shape, rhs.shape);
         let res_data = self.data.iter().zip(rhs.data.iter()).map(|(&a, &b)| a + b).collect();
-        let mut res = Tensor::new(self.shape.clone(), res_data);
-        if self.requires_grad {
+        let requires_grad = self.requires_grad() || rhs.requires_grad();
+        let mut res = Tensor::new(self.shape.clone(), res_data, requires_grad);
+        if requires_grad {
             res.back_prop_fn = Some(Tensor::add_bwd);
             res.back_prop_ctx = Some(BackPropCtx { lhs: Some(self), rhs: Some(rhs) });
-        }
-        else {
-            res.requires_grad = false;
         }
         res
     }
@@ -400,16 +378,14 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 impl<'a, T: Dtype> Div<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
     type Output = Tensor<'a, T>;
     fn div(self, rhs: &'a Tensor<'a, T>) -> Tensor<'a, T> {
-        assert!(self.check_shape(rhs), "Cannot divide tensors with different shapes ({:?} !+ {:?}",
+        assert!(self.is_broadcastable(rhs), "Cannot divide tensors with different shapes ({:?} !+ {:?}",
             self.shape, rhs.shape);
         let res_data = self.data.iter().zip(rhs.data.iter()).map(|(&a, &b)| a / b).collect();
-        let mut res = Tensor::new(self.shape.clone(), res_data);
-        if self.requires_grad {
+        let requires_grad = self.requires_grad() || rhs.requires_grad();
+        let mut res = Tensor::new(self.shape.clone(), res_data, requires_grad);
+        if requires_grad {
             res.back_prop_fn = Some(Tensor::div_bwd);
             res.back_prop_ctx = Some(BackPropCtx { lhs: Some(self), rhs: Some(rhs) });
-        }
-        else {
-            res.requires_grad = false;
         }
         res
     }
@@ -428,13 +404,11 @@ impl<'a, T: Dtype> Tensor<'a, T> {
     }
     pub fn sum(&'a self) -> Self {
         let res_data: T = self.data.iter().map(|x| *x).sum();
-        let mut res = Tensor::new_0d(res_data);
-        if self.requires_grad {
+        let requires_grad = self.grad != None;
+        let mut res = Tensor::new_0d(res_data, requires_grad);
+        if requires_grad {
             res.back_prop_fn = Some(Tensor::sum_bwd);
             res.back_prop_ctx = Some(BackPropCtx { lhs: Some(&self), rhs: None });
-        }
-        else {
-            res.requires_grad = false;
         }
         res
     }
@@ -449,35 +423,32 @@ struct BackPropCtx<'a, T> {
 #[cfg(test)]
 mod constructor_tests {
     use crate::Tensor;
-    use crate::tensor::REQUIRES_GRAD;
 
     #[test]
     fn new_0d() {
-        unsafe {REQUIRES_GRAD = false;}
-        let actual = Tensor::new_0d(1i8);
+        let actual = Tensor::new_0d(1i8, false);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![1i8]);
         assert_eq!(actual.item(), 1i8);
         assert!(actual.grad.is_none());
 
-        let actual = Tensor::new_0d(0i16);
+        let actual = Tensor::new_0d(0i16, false);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![0i16]);
         assert_eq!(actual.item(), 0i16);
         assert!(actual.grad.is_none());
         
-        unsafe {REQUIRES_GRAD = true;}
-        let actual = Tensor::new_0d(-3);
+        let actual = Tensor::new_0d(-3, true);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![-3]);
         assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
 
-        let actual = Tensor::new_0d(1.0f32);
+        let actual = Tensor::new_0d(1.0f32, true);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![1.0f32]);
         assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
 
-        let actual = Tensor::new_0d(-1.5);
+        let actual = Tensor::new_0d(-1.5, true);
         assert_eq!(actual.shape, vec![]);
         assert_eq!(actual.data, vec![-1.5]);
         assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
@@ -485,14 +456,12 @@ mod constructor_tests {
 
     #[test]
     fn new_1d() {
-        unsafe {REQUIRES_GRAD = false;}
-        let empty: Tensor<f32> = Tensor::new_1d(vec![]);
+        let empty: Tensor<f32> = Tensor::new_1d(vec![], false);
         assert_eq!(empty.shape, vec![0]);
         assert_eq!(empty.data.len(), 0);
         assert!(empty.grad.is_none());
 
-        unsafe {REQUIRES_GRAD = true;}
-        let actual = Tensor::new_1d(vec![1.0f32, 2.0f32, 3.0f32]);
+        let actual = Tensor::new_1d(vec![1.0f32, 2.0f32, 3.0f32], true);
         assert_eq!(actual.shape, vec![3]);
         assert_eq!(actual.data, vec![1.0f32, 2.0f32, 3.0f32]);
         assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
@@ -500,16 +469,15 @@ mod constructor_tests {
 
     #[test]
     fn new_2d() {
-        unsafe {REQUIRES_GRAD = false;}
-        let empty: Tensor<f32> = Tensor::new_2d(vec![vec![]]);
+        let empty: Tensor<f32> = Tensor::new_2d(vec![vec![]], false);
         assert_eq!(empty.shape, vec![0,0]);
         assert_eq!(empty.data.len(), 0);
         assert!(empty.grad.is_none());
 
-        unsafe {REQUIRES_GRAD = true;}
         let actual = Tensor::new_2d(vec![
             vec![1.0, 2.0, 3.0],
-            vec![4.0, 5.0, 6.0]]
+            vec![4.0, 5.0, 6.0]],
+            true
         );
         assert_eq!(actual.shape, vec![2,3]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -520,36 +488,35 @@ mod constructor_tests {
     fn new_2d_jagged() {
         let _ = Tensor::new_2d(vec![
             vec![1.0, 2.0, 3.0],
-            vec![4.0, 5.0]]
+            vec![4.0, 5.0]],
+            true
         );
     }
 
     #[test]
     fn new() {
-        unsafe {REQUIRES_GRAD = false;}
-        let empty: Tensor<f64> = Tensor::new(vec![0,0,0], vec![]);
+        let empty: Tensor<f64> = Tensor::new(vec![0,0,0], vec![], false);
         assert_eq!(empty.shape, vec![0,0,0]);
         assert_eq!(empty.data.len(), 0);
         assert!(empty.grad.is_none());
 
         // 0D
-        let actual = Tensor::new(vec![1], vec![1.0]);
+        let actual = Tensor::new(vec![1], vec![1.0], false);
         assert_eq!(actual.shape, vec![1]);
         assert_eq!(actual.data, vec![1.0]);
         assert!(actual.grad.is_none());
 
         // 1D
-        let actual = Tensor::new(vec![3], vec![1.0, 2.0, 3.0]);
+        let actual = Tensor::new(vec![3], vec![1.0, 2.0, 3.0], false);
         assert_eq!(actual.shape, vec![3]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0]);
         assert!(actual.grad.is_none());
 
         // 2D
-        unsafe {REQUIRES_GRAD = true;}
         let actual = Tensor::new(vec![2,3], vec![
             1.0, 2.0, 3.0,
             4.0, 5.0, 6.0
-        ]);
+        ], true);
         assert_eq!(actual.shape, vec![2,3]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
@@ -558,7 +525,7 @@ mod constructor_tests {
             1.0, 2.0,
             3.0, 4.0,
             5.0, 6.0
-        ]);
+        ], true);
         assert_eq!(actual.shape, vec![3,2]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
@@ -572,7 +539,7 @@ mod constructor_tests {
             1.0, 2.0,
             3.0, 4.0,
             5.0, 6.0
-        ]);
+        ], true);
         assert_eq!(actual.shape, vec![2,3,2]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(actual.data.len(), actual.grad.unwrap().borrow().len());
@@ -595,7 +562,7 @@ mod constructor_tests {
             // Batch 1, Channel 1
             13.0, 14.0,
             15.0, 16.0
-        ]);
+        ], true);
         assert_eq!(actual.shape, vec![2,2,2,2]);
         assert_eq!(actual.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
                                      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]);
@@ -606,33 +573,33 @@ mod constructor_tests {
     #[test]
     #[should_panic(expected = "")]
     fn new_invalid_shape() {
-        let _ = Tensor::new(vec![2], vec![1.0, 2.0, 3.0]);
+        let _ = Tensor::new(vec![2], vec![1.0, 2.0, 3.0], false);
     }
     
     #[test]
     fn zeros() {
         // 0D
-        let d0: Tensor<f64> = Tensor::zeros(vec![1]);
+        let d0: Tensor<f64> = Tensor::zeros(vec![1], false);
         assert_eq!(d0.shape, vec![1]);
         assert_eq!(d0.data, vec![0.0; 1]);
 
         // 1D
-        let d1: Tensor<f64> = Tensor::zeros(vec![5]);
+        let d1: Tensor<f64> = Tensor::zeros(vec![5], false);
         assert_eq!(d1.shape, vec![5]);
         assert_eq!(d1.data, vec![0.0; 5]);
 
         // 2D
-        let d1: Tensor<f64> = Tensor::zeros(vec![15, 30]);
+        let d1: Tensor<f64> = Tensor::zeros(vec![15, 30], false);
         assert_eq!(d1.shape, vec![15, 30]);
         assert_eq!(d1.data, vec![0.0; 15 * 30]);
 
         // 3D
-        let d1: Tensor<f64> = Tensor::zeros(vec![15, 30, 100]);
+        let d1: Tensor<f64> = Tensor::zeros(vec![15, 30, 100], false);
         assert_eq!(d1.shape, vec![15, 30, 100]);
         assert_eq!(d1.data, vec![0.0; 15 * 30 * 100]);
 
         // 4D
-        let d1: Tensor<f64> = Tensor::zeros(vec![15, 30, 100, 5]);
+        let d1: Tensor<f64> = Tensor::zeros(vec![15, 30, 100, 5], false);
         assert_eq!(d1.shape, vec![15, 30, 100, 5]);
         assert_eq!(d1.data, vec![0.0; 15 * 30 * 100 * 5]);
     }
@@ -640,27 +607,27 @@ mod constructor_tests {
     #[test]
     fn ones() {
         // 0D
-        let d0: Tensor<f64> = Tensor::ones(vec![1]);
+        let d0: Tensor<f64> = Tensor::ones(vec![1], false);
         assert_eq!(d0.shape, vec![1]);
         assert_eq!(d0.data, vec![1.0; 1]);
 
         // 1D
-        let d1: Tensor<f64> = Tensor::ones(vec![5]);
+        let d1: Tensor<f64> = Tensor::ones(vec![5], false);
         assert_eq!(d1.shape, vec![5]);
         assert_eq!(d1.data, vec![1.0; 5]);
 
         // 2D
-        let d2: Tensor<f64> = Tensor::ones(vec![15, 30]);
+        let d2: Tensor<f64> = Tensor::ones(vec![15, 30], false);
         assert_eq!(d2.shape, vec![15, 30]);
         assert_eq!(d2.data, vec![1.0; 15 * 30]);
 
         // 3D
-        let d3: Tensor<f64> = Tensor::ones(vec![15, 30, 100]);
+        let d3: Tensor<f64> = Tensor::ones(vec![15, 30, 100], false);
         assert_eq!(d3.shape, vec![15, 30, 100]);
         assert_eq!(d3.data, vec![1.0; 15 * 30 * 100]);
 
         // 4D
-        let d4: Tensor<f64> = Tensor::ones(vec![15, 30, 100, 5]);
+        let d4: Tensor<f64> = Tensor::ones(vec![15, 30, 100, 5], false);
         assert_eq!(d4.shape, vec![15, 30, 100, 5]);
         assert_eq!(d4.data, vec![1.0; 15 * 30 * 100 * 5]);
     }
@@ -669,13 +636,12 @@ mod constructor_tests {
 #[cfg(test)]
 mod accessor_tests {
     use crate::Tensor;
-    use crate::tensor::REQUIRES_GRAD;
 
     // TODO Rank tests
 
     #[test]
     fn get() {
-        let d4 = Tensor::new(vec![2,3,4,5], (0..120).map(|i| i as i32).collect());
+        let d4 = Tensor::new(vec![2,3,4,5], (0..120).map(|i| i as i32).collect(), false);
 
         // Naming assumes NCWH
         for n in 0..d4.shape[0] {
@@ -700,9 +666,8 @@ mod accessor_tests {
 
     #[test]
     fn grad_accessor() {
-        unsafe {REQUIRES_GRAD = false;}
         // 0d
-        let mut tensor = Tensor::new(vec![1], vec![5.0]);
+        let mut tensor = Tensor::new(vec![1], vec![5.0], false);
         assert!(!tensor.requires_grad());
         assert!(tensor.grad.is_none());
 
@@ -718,11 +683,11 @@ mod accessor_tests {
 
     #[test]
     fn element_accessor() {
-        let mut d0 = Tensor::new_0d(1);
-        let mut d1 = Tensor::new_1d((1..11).collect());
-        let mut d2 = Tensor::new(vec![3,3],(0..9).map(|x| x as f32).collect());
-        let mut d3 = Tensor::new(vec![3,3,3],(0..27).map(|x| x as f32).collect());
-        let mut d4 = Tensor::new(vec![3,3,3,3],(0..81).map(|x| x as f32).collect());
+        let mut d0 = Tensor::new_0d(1, false);
+        let mut d1 = Tensor::new_1d((1..11).collect(), false);
+        let mut d2 = Tensor::new(vec![3,3],(0..9).map(|x| x as f32).collect(), false);
+        let mut d3 = Tensor::new(vec![3,3,3],(0..27).map(|x| x as f32).collect(), false);
+        let mut d4 = Tensor::new(vec![3,3,3,3],(0..81).map(|x| x as f32).collect(), false);
 
         assert_eq!(d0.element(vec![]), 1);
         assert_eq!(d1.element(vec![1]), 2);
@@ -796,7 +761,6 @@ mod add_tests {
     use crate::error::TensorError;
     use crate::Tensor;
     use crate::tensor::Dtype;
-    use crate::tensor::REQUIRES_GRAD;
 
     fn check_add<'a, T: Dtype>(lhs: &'a Tensor<'a, T>, rhs: &'a Tensor<'a, T>, expected: Vec<T>) {
         let actual = lhs + rhs;
@@ -811,42 +775,40 @@ mod add_tests {
 
     #[test]
     fn add_with_grad() {
-        unsafe {REQUIRES_GRAD = true;}
         // 0d
-        let a = Tensor::new(vec![1], vec![5.0f32]);
-        let b = Tensor::new(vec![1], vec![6.0f32]);
+        let a = Tensor::new(vec![1], vec![5.0f32], true);
+        let b = Tensor::new(vec![1], vec![6.0f32], true);
         let expected = vec![11.0f32];
         check_add(&a, &b, expected);
 
         // 1d
-        let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0]);
-        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
+        let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0], true);
+        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0], true);
         let expected = vec![3.0, 2.0, -4.0];
         check_add(&a, &b, expected);
 
         // 2d
-        let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]);
-        let b = Tensor::new(vec![2, 2], vec![1.0, 4.0, 7.0, 10.0]);
+        let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], true);
+        let b = Tensor::new(vec![2, 2], vec![1.0, 4.0, 7.0, 10.0], true);
         let expected = vec![6.0, 10.0, 14.0, 18.0];
         check_add(&a, &b, expected);
 
         // 3d
-        let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
-        let b = Tensor::new(vec![2, 2, 2], vec![4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]);
+        let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], true);
+        let b = Tensor::new(vec![2, 2, 2], vec![4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0], true);
         let expected = vec![4.0, 7.0, 10.0, 13.0, 16.0, 19.0, 22.0, 25.0];
         check_add(&a, &b, expected);
 
         // 4d
-        let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
-        let b = Tensor::new(vec![2, 2, 2, 2], vec![8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0]);
+        let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0], true);
+        let b = Tensor::new(vec![2, 2, 2, 2], vec![8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0], true);
         let expected = vec![8.0, 11.0, 14.0, 17.0, 20.0, 23.0, 26.0, 29.0, 32.0, 35.0, 38.0, 41.0, 44.0, 47.0, 50.0, 53.0];
         check_add(&a, &b, expected);
     }
     #[test]
     fn add_no_grad() {
-        unsafe {REQUIRES_GRAD = false;}
-        let a = Tensor::new(vec![1], vec![5.0]);
-        let b = Tensor::new(vec![1], vec![6.0]);
+        let a = Tensor::new(vec![1], vec![5.0], false);
+        let b = Tensor::new(vec![1], vec![6.0], false);
         let actual = &a + &b;
         let expected = vec![11.0];
         assert_eq!(actual.data, expected);
@@ -856,9 +818,8 @@ mod add_tests {
     }
     #[test]
     fn add_int() {
-        unsafe {REQUIRES_GRAD = false;}
-        let a = Tensor::new(vec![1], vec![50]);
-        let b = Tensor::new(vec![1], vec![60]);
+        let a = Tensor::new(vec![1], vec![50], false);
+        let b = Tensor::new(vec![1], vec![60], false);
         let actual = &a + &b;
         let expected = vec![110];
         assert_eq!(actual.data, expected);
@@ -869,8 +830,8 @@ mod add_tests {
     #[test]
     #[should_panic(expected = "")]
     fn add_shape_mismatch() {
-        let a = Tensor::new(vec![1], vec![5.0]);
-        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
+        let a = Tensor::new(vec![3], vec![5.0, 4.0], false);
+        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0], false);
         let _ = &a + &b;
     }
 }
@@ -880,7 +841,6 @@ mod div_tests {
     use crate::error::TensorError;
     use crate::Tensor;
     use crate::tensor::Dtype;
-    use crate::tensor::REQUIRES_GRAD;
 
     fn assert_almost_equal_vec<T: Dtype>(actual: &Vec<T>, expected: &Vec<T>) {
         actual.iter().zip(expected.iter()).for_each(|(a, e)| {
@@ -909,42 +869,41 @@ mod div_tests {
 
     #[test]
     fn div_with_grad() {
-        unsafe {REQUIRES_GRAD = true;}
         // 0d
-        let a = Tensor::new(vec![1], vec![5.0]);
-        let b = Tensor::new(vec![1], vec![6.0]);
+        let a = Tensor::new(vec![1], vec![5.0], true);
+        let b = Tensor::new(vec![1], vec![6.0], true);
         let expected_data = vec![0.8333333333333334];
         let lhs_expected_grad = Some(vec![0.16666666666666666]);
         let rhs_expected_grad = Some(vec![-0.1388888888888889]);
         check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
 
         // 1d
-        let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0]);
-        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
+        let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0], true);
+        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0], true);
         let expected_data = vec![0.5, -0.3333333333333333, -0.3333333333333333];
         let lhs_expected_grad = Some(vec![0.5, 0.3333333333333333, -0.16666666666666666]);
         let rhs_expected_grad = Some(vec![-0.25, 0.1111111111111111, -0.05555555555555555]);
         check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
 
         // 2d
-        let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]);
-        let b = Tensor::new(vec![2, 2], vec![1.0, 4.0, 7.0, 10.0]);
+        let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], true);
+        let b = Tensor::new(vec![2, 2], vec![1.0, 4.0, 7.0, 10.0], true);
         let expected_data = vec![5.0, 1.5, 1.0, 0.8];
         let lhs_expected_grad = Some(vec![1.0, 0.25, 0.14285714285714285, 0.1]);
         let rhs_expected_grad = Some(vec![-5.0, -0.375, -0.14285714285714285, -0.08]);
         check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
 
         // 3d
-        let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
-        let b = Tensor::new(vec![2, 2, 2], vec![4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]);
+        let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], true);
+        let b = Tensor::new(vec![2, 2, 2], vec![4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0], true);
         let expected_data = vec![0.0, 0.16666666666666666, 0.25, 0.3, 0.3333333333333333, 0.35714285714285715, 0.375, 0.3888888888888889];
         let lhs_expected_grad = Some(vec![0.25, 0.16666666666666666, 0.125, 0.1, 0.08333333333333333, 0.07142857142857142, 0.0625, 0.05555555555555555]);
         let rhs_expected_grad = Some(vec![-0.0, -0.027777777777777776, -0.03125, -0.03, -0.027777777777777776, -0.025510204081632654, -0.0234375, -0.021604938271604937]);
         check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
 
         // 4d
-        let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
-        let b = Tensor::new(vec![2, 2, 2, 2], vec![8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0]);
+        let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0], true);
+        let b = Tensor::new(vec![2, 2, 2, 2], vec![8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0], true);
         let expected_data = vec![0.0, 0.1, 0.16666666666666666, 0.21428571428571427, 0.25, 0.2777777777777778, 0.3, 0.3181818181818182, 0.3333333333333333, 0.34615384615384615, 0.35714285714285715, 0.36666666666666664, 0.375, 0.38235294117647056, 0.3888888888888889, 0.39473684210526316];
         let lhs_expected_grad = Some(vec![0.125, 0.1, 0.08333333333333333, 0.07142857142857142, 0.0625, 0.05555555555555555, 0.05, 0.045454545454545456, 0.041666666666666664, 0.038461538461538464, 0.03571428571428571, 0.03333333333333333, 0.03125, 0.029411764705882353, 0.027777777777777776, 0.02631578947368421]);
         let rhs_expected_grad = Some(vec![-0.0, -0.01, -0.013888888888888888, -0.015306122448979591, -0.015625, -0.0154320987654321, -0.015, -0.014462809917355372, -0.013888888888888888, -0.013313609467455622, -0.012755102040816327, -0.012222222222222221, -0.01171875, -0.011245674740484428, -0.010802469135802469, -0.01038781163434903]);
@@ -952,10 +911,9 @@ mod div_tests {
     }
     #[test]
     fn div_no_grad() {
-        unsafe {REQUIRES_GRAD = false;}
         // 0d
-        let a = Tensor::new(vec![1], vec![5.0]);
-        let b = Tensor::new(vec![1], vec![6.0]);
+        let a = Tensor::new(vec![1], vec![5.0], false);
+        let b = Tensor::new(vec![1], vec![6.0], false);
         let actual = &a / &b;
         let expected = vec![5.0/6.0];
         assert_eq!(actual.data, expected);
@@ -965,10 +923,9 @@ mod div_tests {
     }
     #[test]
     fn div_int() {
-        unsafe {REQUIRES_GRAD = false;}
         // 0d
-        let a = Tensor::new(vec![1], vec![50.0]);
-        let b = Tensor::new(vec![1], vec![65.0]);
+        let a = Tensor::new(vec![1], vec![50.0], false);
+        let b = Tensor::new(vec![1], vec![65.0], false);
         let actual = &a / &b;
         let expected = vec![50.0/65.0];
         assert_eq!(actual.data, expected);
@@ -980,8 +937,8 @@ mod div_tests {
     #[should_panic(expected = "")]
     fn div_shape_mismatch() {
         // 0d
-        let a = Tensor::new(vec![1], vec![5.0]);
-        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0]);
+        let a = Tensor::new(vec![1], vec![5.0, 2.0], false);
+        let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0], false);
         let _ = &a / &b;
     }
 }
@@ -991,7 +948,6 @@ mod sum_test {
     use crate::error::TensorError;
     use crate::Tensor;
     use crate::tensor::Dtype;
-    use crate::tensor::REQUIRES_GRAD;
 
     fn check_sum<'a, T: Dtype>(a: &'a Tensor<'a, T>, expected_data: T) {
         let actual = a.sum();
@@ -1004,37 +960,35 @@ mod sum_test {
 
     #[test]
     fn sum_with_grad() {
-        unsafe {REQUIRES_GRAD = true;}
         // 0d
-        let a = Tensor::new(vec![1], vec![5.0]);
+        let a = Tensor::new(vec![1], vec![5.0], true);
         let expected_data = a.data.iter().sum();
         check_sum(&a, expected_data);
 
         // 1d
-        let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0]);
+        let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0], true);
         let expected_data = a.data.iter().sum();
         check_sum(&a, expected_data);
 
         // 2d
-        let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]);
+        let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], true);
         let expected_data = a.data.iter().sum();
         check_sum(&a, expected_data);
 
         // 3d
-        let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], true);
         let expected_data = a.data.iter().sum();
         check_sum(&a, expected_data);
 
         // 4d
-        let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+        let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0], true);
         let expected_data = a.data.iter().sum();
         check_sum(&a, expected_data);
     }
     #[test]
     fn sum_no_grad() {
-        unsafe {REQUIRES_GRAD = false;}
         // 0d
-        let a = Tensor::new(vec![1], vec![5.0]);
+        let a = Tensor::new(vec![1], vec![5.0], false);
         let actual = a.sum();
         let expected = 5.0;
         assert_eq!(actual.item(), expected);
