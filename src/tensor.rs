@@ -218,9 +218,46 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 
 // Misc
 impl<'a, T: Dtype> Tensor<'a, T> {
-    fn check_shape(&self, other: &Tensor<T>) -> bool {
-        // TODO Relax this constraint to allow broadcasting
-        self.shape == other.shape
+    fn is_broadcastable(&self, other: &Tensor<T>) -> bool {
+        if self.shape == other.shape {
+            return true;
+        }
+
+        // For now, only support limited broadcasting of single-element tensors
+        if self.shape.is_empty() || self.shape.iter().product::<usize>() == 1 ||
+           other.shape.is_empty() || other.shape.iter().product::<usize>() == 1 {
+            return true;
+        }
+
+        false
+    }
+
+    fn get_broadcasted_shape(&self, other: &Tensor<T>) -> Result<Vec<usize>, TensorError> {
+        if !self.is_broadcastable(other) {
+            return Err(TensorError::IncompatibleShape);
+        }
+        
+        // If the shapes are the same, just clone one
+        if self.shape == other.shape {
+            return Ok(self.shape.clone());
+        }
+
+        let (longer_shape, shorter_shape) = if self.shape.len() > other.shape.len() {
+            (self.shape.as_slice(), other.shape.as_slice())
+        }
+        else {
+            (other.shape.as_slice(), self.shape.as_slice())
+        };
+        
+        // The broadcasted shaped will be the shorter of the two shapes prepended with 1s to give it the same number
+        // of dimensions as the longer shape. This steps takes care of prepending with 1s
+        let mut broadcasted_shape = shorter_shape.to_vec();
+        (0..(longer_shape.len() - shorter_shape.len())).for_each(|_| broadcasted_shape.insert(0, 1));
+
+        for i in 0..broadcasted_shape.len() {
+            broadcasted_shape[i] = broadcasted_shape[i].max(longer_shape[i]);
+        }
+        Ok(broadcasted_shape)
     }
 
     fn print_vec_as_tensor(shape: &Vec<usize>, vec: &Vec<T>, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -254,7 +291,7 @@ impl<'a, T: Dtype> Display for Tensor<'a, T> {
         write!(f, "Data:")?;
         Tensor::print_vec_as_tensor(&self.shape, &self.data, f)?;
         if let Some(grad) = &self.grad {
-            writeln!(f, "Grad:")?;
+            write!(f, "Grad:")?;
             Tensor::print_vec_as_tensor(&self.shape, &grad.borrow(), f)?;
         }
         // TODO Also print the DType
@@ -275,9 +312,17 @@ impl<'a, T> Hash for Tensor<'a, T> {
 
 // Automatic differentiation
 impl<'a, T: Dtype> Tensor<'a, T> {
+    // TODO Add tests for this
+    pub fn zero_grad(&self) {
+        self.grad.as_ref().as_mut().map(|ref_cell| ref_cell.borrow_mut().iter_mut().for_each(|x| *x = T::zero()));
+    }
+
     fn update_grad(grad: &mut Vec<T>, updates: &Vec<T>) {
-        for (g, u) in grad.iter_mut().zip(updates.iter()) {
-            *g += *u;
+        // TODO I am not at all certain this is a general solution, but I believe it works for the simplified broad-
+        // casting I currently allow
+        let grad_len = grad.len();
+        for (i, update) in updates.iter().enumerate() {
+            grad[i % grad_len] += *update;
         }
     }
 
@@ -339,11 +384,17 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 impl<'a, T: Dtype> Add<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
     type Output = Tensor<'a, T>;
     fn add(self, rhs: &'a Tensor<'a, T>) -> Tensor<'a, T> {
-        assert!(self.is_broadcastable(rhs), "Cannot add tensors with different shapes ({:?} !+ {:?}",
-            self.shape, rhs.shape);
-        let res_data = self.data.iter().zip(rhs.data.iter()).map(|(&a, &b)| a + b).collect();
+        let res_shape = self.get_broadcasted_shape(rhs)
+            .expect(format!("Cannot add tensors with different shapes ({:?} !+ {:?}", self.shape, rhs.shape).as_str());
+        let res_len = res_shape.iter().product();
+        
+        // TODO Does this work generically for any type of broadcasting?
+        let self_iter = self.data.iter().cycle();
+        let rhs_iter = rhs.data.iter().cycle();
+        let res_data = self_iter.take(res_len).zip(rhs_iter).map(|(&a, &b)| a + b).collect();
+
         let requires_grad = self.requires_grad() || rhs.requires_grad();
-        let mut res = Tensor::new(self.shape.clone(), res_data, requires_grad);
+        let mut res = Tensor::new(res_shape, res_data, requires_grad);
         if requires_grad {
             res.back_prop_fn = Some(Tensor::add_bwd);
             res.back_prop_ctx = Some(BackPropCtx { lhs: Some(self), rhs: Some(rhs) });
@@ -358,9 +409,11 @@ impl<'a, T: Dtype> Tensor<'a, T> {
         let numerator_data = &ctx.lhs.expect("LHS (numerator) Tensor was none during dev back propagation").data;
         let denominator = &ctx.rhs.expect("RHS (denominator) Tensor was none during dev back propagation").data;
 
+        let update_len = self_grad.len();
         let two = T::one() + T::one();
-        let numerator_updates = denominator.iter().zip(self_grad.iter()).map(|(&r, &g)| g / r).collect();
-        let denominator_updates = numerator_data.iter().zip(denominator.iter()).zip(self_grad.iter())
+        let numerator_updates = denominator.iter().cycle().take(update_len).zip(self_grad.iter())
+            .map(|(&r, &g)| g / r).collect();
+        let denominator_updates = numerator_data.iter().cycle().take(update_len).zip(denominator.iter().cycle().take(update_len)).zip(self_grad.iter())
             .map(|((&l, &r), &g)| {
                 let result = -(l / r.pow(two)) * g;
                 result
@@ -378,11 +431,17 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 impl<'a, T: Dtype> Div<&'a Tensor<'a, T>> for &'a Tensor<'a, T> {
     type Output = Tensor<'a, T>;
     fn div(self, rhs: &'a Tensor<'a, T>) -> Tensor<'a, T> {
-        assert!(self.is_broadcastable(rhs), "Cannot divide tensors with different shapes ({:?} !+ {:?}",
-            self.shape, rhs.shape);
-        let res_data = self.data.iter().zip(rhs.data.iter()).map(|(&a, &b)| a / b).collect();
+        let res_shape = self.get_broadcasted_shape(rhs)
+            .expect(format!("Cannot add tensors with different shapes ({:?} !+ {:?}", self.shape, rhs.shape).as_str());
+        let res_len = res_shape.iter().product();
+        
+        // TODO Does this work generically for any type of broadcasting?
+        let self_iter = self.data.iter().cycle();
+        let rhs_iter = rhs.data.iter().cycle();
+        let res_data = self_iter.take(res_len).zip(rhs_iter).map(|(&a, &b)| a / b).collect();
+
         let requires_grad = self.requires_grad() || rhs.requires_grad();
-        let mut res = Tensor::new(self.shape.clone(), res_data, requires_grad);
+        let mut res = Tensor::new(res_shape, res_data, requires_grad);
         if requires_grad {
             res.back_prop_fn = Some(Tensor::div_bwd);
             res.back_prop_ctx = Some(BackPropCtx { lhs: Some(self), rhs: Some(rhs) });
@@ -418,6 +477,19 @@ impl<'a, T: Dtype> Tensor<'a, T> {
 struct BackPropCtx<'a, T> {
     lhs: Option<&'a Tensor<'a, T>>,
     rhs: Option<&'a Tensor<'a, T>>,
+}
+
+mod test_utils {
+    use crate::tensor::Dtype;
+    #[allow(dead_code)] // Rust analyzer incorrectly flags this as dead code
+    pub fn assert_almost_equal_vec<T: Dtype>(actual: &Vec<T>, expected: &Vec<T>) {
+        actual.iter().zip(expected.iter()).for_each(|(a, e)| {
+            if !T::almost_equal(a, e) {
+                panic!("actual: {:?}, expected: {:?}, epsilon: {:?}, diff: {:?}, expected*epsilon: {:?}",
+                    a, e, T::epsilon(), (*a - *e).abs(), T::epsilon() * *e);
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -634,6 +706,115 @@ mod constructor_tests {
 }
 
 #[cfg(test)]
+mod misc_tests {
+    use crate::Tensor;
+
+    #[test]
+    fn is_broadcastable() {
+        // 0d
+        let a = Tensor::new_0d(5, false);
+        let b = Tensor::new_0d(6, false);
+        assert!(a.is_broadcastable(&b));
+
+        // 1d
+        let a = Tensor::new_1d(vec![1, -1, 2], false);
+        let b = Tensor::new_1d(vec![2, 3, -6], false);
+        let too_short = Tensor::new_1d(vec![2, 3], false);
+        let too_long = Tensor::new_1d(vec![2, 3, 3, 4], false);
+        let d0 = Tensor::new_0d(10, false);
+        assert!(a.is_broadcastable(&b));
+        assert!(a.is_broadcastable(&d0));
+        assert!(!a.is_broadcastable(&too_short));
+        assert!(!a.is_broadcastable(&too_long));
+
+        // 2d
+        let a = Tensor::ones(vec![3, 3], false);
+        let b = Tensor::zeros(vec![3, 3], false);
+        let too_short = Tensor::ones(vec![2, 3], false);
+        let too_long = Tensor::ones(vec![3,4], false);
+        let d0 = Tensor::new_0d(10, false);
+        let d1 = Tensor::ones(vec![1], false);
+        assert!(a.is_broadcastable(&b));
+        assert!(a.is_broadcastable(&d0));
+        assert!(a.is_broadcastable(&d1));
+        assert!(!a.is_broadcastable(&too_short));
+        assert!(!a.is_broadcastable(&too_long));
+
+        // 3d
+        let a = Tensor::ones(vec![3, 3, 3], false);
+        let b = Tensor::zeros(vec![3, 3, 3], false);
+        let too_short = Tensor::ones(vec![2, 3, 3], false);
+        let too_long = Tensor::ones(vec![3, 4, 3], false);
+        let d0 = Tensor::new_0d(10, false);
+        let d1 = Tensor::ones(vec![1], false);
+        let d2 = Tensor::ones(vec![1, 1], false);
+        assert!(a.is_broadcastable(&b));
+        assert!(a.is_broadcastable(&d0));
+        assert!(a.is_broadcastable(&d1));
+        assert!(a.is_broadcastable(&d2));
+        assert!(!a.is_broadcastable(&too_short));
+        assert!(!a.is_broadcastable(&too_long));
+
+        // 4d
+        let a = Tensor::ones(vec![3, 3, 3, 3], false);
+        let b = Tensor::zeros(vec![3, 3, 3, 3], false);
+        let too_short = Tensor::ones(vec![3, 3, 3, 2], false);
+        let too_long = Tensor::ones(vec![3, 3, 4, 3], false);
+        let d0 = Tensor::new_0d(10, false);
+        let d1 = Tensor::ones(vec![1], false);
+        let d2 = Tensor::ones(vec![1, 1], false);
+        let d3 = Tensor::ones(vec![1, 1, 1], false);
+        assert!(a.is_broadcastable(&b));
+        assert!(a.is_broadcastable(&d0));
+        assert!(a.is_broadcastable(&d1));
+        assert!(a.is_broadcastable(&d2));
+        assert!(a.is_broadcastable(&d3));
+        assert!(!a.is_broadcastable(&too_short));
+        assert!(!a.is_broadcastable(&too_long));
+    }
+    
+    #[test]
+    fn broadcast_single_element() {
+        // 1d
+        let single_0d = Tensor::new_0d(0, false);
+        let single_1d = Tensor::new_1d(vec![1], false);
+        let single_2d = Tensor::new_2d(vec![vec![2]], false);
+        let single_3d = Tensor::new(vec![1,1,1], vec![3], false);
+        let single_4d = Tensor::new(vec![1,1,1,1], vec![4], false);
+
+        let multi_1d = Tensor::new(vec![3], vec![1, 2, 3], false);
+        let multi_2d = Tensor::new(vec![2, 3], vec![1, 2, 3, 4, 5, 6], false);
+        let multi_3d = Tensor::new(vec![2, 2, 3], vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], false);
+        let multi_4d = Tensor::new(vec![2, 2, 2, 3], vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2], false);
+        
+        assert_eq!(vec![3], single_0d.get_broadcasted_shape(&multi_1d).unwrap());
+        assert_eq!(vec![2, 3], single_0d.get_broadcasted_shape(&multi_2d).unwrap());
+        assert_eq!(vec![2, 2, 3], single_0d.get_broadcasted_shape(&multi_3d).unwrap());
+        assert_eq!(vec![2, 2, 2, 3], single_0d.get_broadcasted_shape(&multi_4d).unwrap());
+    
+        assert_eq!(vec![3], single_1d.get_broadcasted_shape(&multi_1d).unwrap());
+        assert_eq!(vec![2, 3], single_1d.get_broadcasted_shape(&multi_2d).unwrap());
+        assert_eq!(vec![2, 2, 3], single_1d.get_broadcasted_shape(&multi_3d).unwrap());
+        assert_eq!(vec![2, 2, 2, 3], single_1d.get_broadcasted_shape(&multi_4d).unwrap());
+    
+        assert_eq!(vec![1, 3], single_2d.get_broadcasted_shape(&multi_1d).unwrap());
+        assert_eq!(vec![2, 3], single_2d.get_broadcasted_shape(&multi_2d).unwrap());
+        assert_eq!(vec![2, 2, 3], single_2d.get_broadcasted_shape(&multi_3d).unwrap());
+        assert_eq!(vec![2, 2, 2, 3], single_2d.get_broadcasted_shape(&multi_4d).unwrap());
+    
+        assert_eq!(vec![1, 1, 3], single_3d.get_broadcasted_shape(&multi_1d).unwrap());
+        assert_eq!(vec![1, 2, 3], single_3d.get_broadcasted_shape(&multi_2d).unwrap());
+        assert_eq!(vec![2, 2, 3], single_3d.get_broadcasted_shape(&multi_3d).unwrap());
+        assert_eq!(vec![2, 2, 2, 3], single_3d.get_broadcasted_shape(&multi_4d).unwrap());
+    
+        assert_eq!(vec![1, 1, 1, 3], single_4d.get_broadcasted_shape(&multi_1d).unwrap());
+        assert_eq!(vec![1, 1, 2, 3], single_4d.get_broadcasted_shape(&multi_2d).unwrap());
+        assert_eq!(vec![1, 2, 2, 3], single_4d.get_broadcasted_shape(&multi_3d).unwrap());
+        assert_eq!(vec![2, 2, 2, 3], single_4d.get_broadcasted_shape(&multi_4d).unwrap());
+    }
+}
+
+#[cfg(test)]
 mod accessor_tests {
     use crate::Tensor;
 
@@ -761,16 +942,22 @@ mod add_tests {
     use crate::error::TensorError;
     use crate::Tensor;
     use crate::tensor::Dtype;
+    use crate::tensor::test_utils::assert_almost_equal_vec;
 
-    fn check_add<'a, T: Dtype>(lhs: &'a Tensor<'a, T>, rhs: &'a Tensor<'a, T>, expected: Vec<T>) {
+    fn check_add<'a, T: Dtype>(
+        lhs: &'a Tensor<'a, T>,
+        rhs: &'a Tensor<'a, T>,
+        expected_data: &Vec<T>,
+        lhs_expected_grad: &Option<Vec<T>>,
+        rhs_expected_grad: &Option<Vec<T>>) {
         let actual = lhs + rhs;
-        assert_eq!(actual.data, expected);
+        assert_almost_equal_vec(&actual.data, &expected_data);
 
         actual.bwd().unwrap();
-        let lhs_grad = lhs.grad.as_ref().unwrap().borrow();
-        let rhs_grad = rhs.grad.as_ref().unwrap().borrow();
-        assert_eq!(*lhs_grad, vec![T::one(); lhs.shape.iter().product()]);
-        assert_eq!(*rhs_grad, vec![T::one(); rhs.shape.iter().product()]);
+        let lhs_grad = lhs.grad.as_ref().map(|refcell_vec| refcell_vec.borrow().clone());
+        let rhs_grad = rhs.grad.as_ref().map(|refcell_vec| refcell_vec.borrow().clone());
+        assert_almost_equal_vec(&lhs_grad.unwrap(), &lhs_expected_grad.clone().unwrap());
+        assert_almost_equal_vec(&rhs_grad.unwrap(), &rhs_expected_grad.clone().unwrap());
     }
 
     #[test]
@@ -779,31 +966,36 @@ mod add_tests {
         let a = Tensor::new(vec![1], vec![5.0f32], true);
         let b = Tensor::new(vec![1], vec![6.0f32], true);
         let expected = vec![11.0f32];
-        check_add(&a, &b, expected);
+        check_add(&a, &b, &expected, &Some(vec![1.0f32; a.shape.iter().product()]),
+            &Some(vec![1.0f32; a.shape.iter().product()]));
 
         // 1d
         let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0], true);
         let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0], true);
         let expected = vec![3.0, 2.0, -4.0];
-        check_add(&a, &b, expected);
+        check_add(&a, &b, &expected, &Some(vec![1.0; a.shape.iter().product()]),
+            &Some(vec![1.0; a.shape.iter().product()]));
 
         // 2d
         let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], true);
         let b = Tensor::new(vec![2, 2], vec![1.0, 4.0, 7.0, 10.0], true);
         let expected = vec![6.0, 10.0, 14.0, 18.0];
-        check_add(&a, &b, expected);
+        check_add(&a, &b, &expected, &Some(vec![1.0; a.shape.iter().product()]),
+            &Some(vec![1.0; a.shape.iter().product()]));
 
         // 3d
         let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], true);
         let b = Tensor::new(vec![2, 2, 2], vec![4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0], true);
         let expected = vec![4.0, 7.0, 10.0, 13.0, 16.0, 19.0, 22.0, 25.0];
-        check_add(&a, &b, expected);
+        check_add(&a, &b, &expected, &Some(vec![1.0; a.shape.iter().product()]),
+            &Some(vec![1.0; a.shape.iter().product()]));
 
         // 4d
         let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0], true);
         let b = Tensor::new(vec![2, 2, 2, 2], vec![8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0], true);
         let expected = vec![8.0, 11.0, 14.0, 17.0, 20.0, 23.0, 26.0, 29.0, 32.0, 35.0, 38.0, 41.0, 44.0, 47.0, 50.0, 53.0];
-        check_add(&a, &b, expected);
+        check_add(&a, &b, &expected, &Some(vec![1.0; a.shape.iter().product()]),
+            &Some(vec![1.0; a.shape.iter().product()]));
     }
     #[test]
     fn add_no_grad() {
@@ -828,6 +1020,17 @@ mod add_tests {
         assert_eq!(actual.bwd(), Err(TensorError::NoGrad));
     }
     #[test]
+    fn add_with_broadcast() {
+        let a = Tensor::new(vec![], vec![2.0], true);
+        let b = Tensor::new(vec![2, 3], vec![1.0, 2.0, 4.0, 8.0, 32.0, 64.0], true);
+        let expected_data = vec![3.0, 4.0, 6.0, 10.0, 34.0, 66.0];
+        let a_grad = Some(vec![6.0]);
+        let b_grad = Some(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        check_add(&a, &b, &expected_data, &a_grad, &b_grad);
+        a.zero_grad(); b.zero_grad();
+        check_add(&b, &a, &expected_data, &b_grad, &a_grad);
+    }
+    #[test]
     #[should_panic(expected = "")]
     fn add_shape_mismatch() {
         let a = Tensor::new(vec![3], vec![5.0, 4.0], false);
@@ -841,30 +1044,22 @@ mod div_tests {
     use crate::error::TensorError;
     use crate::Tensor;
     use crate::tensor::Dtype;
-
-    fn assert_almost_equal_vec<T: Dtype>(actual: &Vec<T>, expected: &Vec<T>) {
-        actual.iter().zip(expected.iter()).for_each(|(a, e)| {
-            if !T::almost_equal(a, e) {
-                panic!("actual: {:?}, expected: {:?}, epsilon: {:?}, diff: {:?}, expected*epsilon: {:?}",
-                    a, e, T::epsilon(), (*a - *e).abs(), T::epsilon() * *e);
-            }
-        });
-    }
+    use crate::tensor::test_utils::assert_almost_equal_vec;
 
     fn check_div<'a, T: Dtype>(
-        lhs: &'a Tensor<'a, T>,
-        rhs: &'a Tensor<'a, T>,
-        expected_data: Vec<T>,
-        lhs_expected_grad: Option<Vec<T>>,
-        rhs_expected_grad: Option<Vec<T>>) {
-        let actual = lhs / rhs;
+        numerator: &'a Tensor<'a, T>,
+        denominator: &'a Tensor<'a, T>,
+        expected_data: &Vec<T>,
+        numerator_expected_grad: &Option<Vec<T>>,
+        denominator_expected_grad: &Option<Vec<T>>) {
+        let actual = numerator / denominator;
         assert_almost_equal_vec(&actual.data, &expected_data);
 
         actual.bwd().unwrap();
-        let lhs_grad = lhs.grad.as_ref().map(|refcell_vec| refcell_vec.borrow().clone());
-        let rhs_grad = rhs.grad.as_ref().map(|refcell_vec| refcell_vec.borrow().clone());
-        assert_almost_equal_vec(&lhs_grad.unwrap(), &lhs_expected_grad.unwrap());
-        assert_almost_equal_vec(&rhs_grad.unwrap(), &rhs_expected_grad.unwrap());
+        let numerator_grad = numerator.grad.as_ref().map(|refcell_vec| refcell_vec.borrow().clone());
+        let denominator_grad = denominator.grad.as_ref().map(|refcell_vec| refcell_vec.borrow().clone());
+        assert_almost_equal_vec(&numerator_grad.unwrap(), &numerator_expected_grad.clone().unwrap());
+        assert_almost_equal_vec(&denominator_grad.unwrap(), &denominator_expected_grad.clone().unwrap());
     }
 
     #[test]
@@ -873,41 +1068,41 @@ mod div_tests {
         let a = Tensor::new(vec![1], vec![5.0], true);
         let b = Tensor::new(vec![1], vec![6.0], true);
         let expected_data = vec![0.8333333333333334];
-        let lhs_expected_grad = Some(vec![0.16666666666666666]);
-        let rhs_expected_grad = Some(vec![-0.1388888888888889]);
-        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+        let a_grad = Some(vec![0.16666666666666666]);
+        let b_grad = Some(vec![-0.1388888888888889]);
+        check_div(&a, &b, &expected_data, &a_grad, &b_grad);
 
         // 1d
         let a = Tensor::new(vec![3], vec![1.0, -1.0, 2.0], true);
         let b = Tensor::new(vec![3], vec![2.0, 3.0, -6.0], true);
         let expected_data = vec![0.5, -0.3333333333333333, -0.3333333333333333];
-        let lhs_expected_grad = Some(vec![0.5, 0.3333333333333333, -0.16666666666666666]);
-        let rhs_expected_grad = Some(vec![-0.25, 0.1111111111111111, -0.05555555555555555]);
-        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+        let a_grad = Some(vec![0.5, 0.3333333333333333, -0.16666666666666666]);
+        let b_grad = Some(vec![-0.25, 0.1111111111111111, -0.05555555555555555]);
+        check_div(&a, &b, &expected_data, &a_grad, &b_grad);
 
         // 2d
         let a = Tensor::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], true);
         let b = Tensor::new(vec![2, 2], vec![1.0, 4.0, 7.0, 10.0], true);
         let expected_data = vec![5.0, 1.5, 1.0, 0.8];
-        let lhs_expected_grad = Some(vec![1.0, 0.25, 0.14285714285714285, 0.1]);
-        let rhs_expected_grad = Some(vec![-5.0, -0.375, -0.14285714285714285, -0.08]);
-        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+        let a_grad = Some(vec![1.0, 0.25, 0.14285714285714285, 0.1]);
+        let b_grad = Some(vec![-5.0, -0.375, -0.14285714285714285, -0.08]);
+        check_div(&a, &b, &expected_data, &a_grad, &b_grad);
 
         // 3d
         let a = Tensor::new(vec![2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], true);
         let b = Tensor::new(vec![2, 2, 2], vec![4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0], true);
         let expected_data = vec![0.0, 0.16666666666666666, 0.25, 0.3, 0.3333333333333333, 0.35714285714285715, 0.375, 0.3888888888888889];
-        let lhs_expected_grad = Some(vec![0.25, 0.16666666666666666, 0.125, 0.1, 0.08333333333333333, 0.07142857142857142, 0.0625, 0.05555555555555555]);
-        let rhs_expected_grad = Some(vec![-0.0, -0.027777777777777776, -0.03125, -0.03, -0.027777777777777776, -0.025510204081632654, -0.0234375, -0.021604938271604937]);
-        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+        let a_grad = Some(vec![0.25, 0.16666666666666666, 0.125, 0.1, 0.08333333333333333, 0.07142857142857142, 0.0625, 0.05555555555555555]);
+        let b_grad = Some(vec![-0.0, -0.027777777777777776, -0.03125, -0.03, -0.027777777777777776, -0.025510204081632654, -0.0234375, -0.021604938271604937]);
+        check_div(&a, &b, &expected_data, &a_grad, &b_grad);
 
         // 4d
         let a = Tensor::new(vec![2, 2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0], true);
         let b = Tensor::new(vec![2, 2, 2, 2], vec![8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0], true);
         let expected_data = vec![0.0, 0.1, 0.16666666666666666, 0.21428571428571427, 0.25, 0.2777777777777778, 0.3, 0.3181818181818182, 0.3333333333333333, 0.34615384615384615, 0.35714285714285715, 0.36666666666666664, 0.375, 0.38235294117647056, 0.3888888888888889, 0.39473684210526316];
-        let lhs_expected_grad = Some(vec![0.125, 0.1, 0.08333333333333333, 0.07142857142857142, 0.0625, 0.05555555555555555, 0.05, 0.045454545454545456, 0.041666666666666664, 0.038461538461538464, 0.03571428571428571, 0.03333333333333333, 0.03125, 0.029411764705882353, 0.027777777777777776, 0.02631578947368421]);
-        let rhs_expected_grad = Some(vec![-0.0, -0.01, -0.013888888888888888, -0.015306122448979591, -0.015625, -0.0154320987654321, -0.015, -0.014462809917355372, -0.013888888888888888, -0.013313609467455622, -0.012755102040816327, -0.012222222222222221, -0.01171875, -0.011245674740484428, -0.010802469135802469, -0.01038781163434903]);
-        check_div(&a, &b, expected_data, lhs_expected_grad, rhs_expected_grad);
+        let a_grad = Some(vec![0.125, 0.1, 0.08333333333333333, 0.07142857142857142, 0.0625, 0.05555555555555555, 0.05, 0.045454545454545456, 0.041666666666666664, 0.038461538461538464, 0.03571428571428571, 0.03333333333333333, 0.03125, 0.029411764705882353, 0.027777777777777776, 0.02631578947368421]);
+        let b_grad = Some(vec![-0.0, -0.01, -0.013888888888888888, -0.015306122448979591, -0.015625, -0.0154320987654321, -0.015, -0.014462809917355372, -0.013888888888888888, -0.013313609467455622, -0.012755102040816327, -0.012222222222222221, -0.01171875, -0.011245674740484428, -0.010802469135802469, -0.01038781163434903]);
+        check_div(&a, &b, &expected_data, &a_grad, &b_grad);
     }
     #[test]
     fn div_no_grad() {
@@ -932,6 +1127,21 @@ mod div_tests {
         assert!(a.grad.is_none());
         assert!(b.grad.is_none());
         assert_eq!(actual.bwd(), Err(TensorError::NoGrad));
+    }
+    #[test]
+    fn div_with_broadcast() {
+        let a = Tensor::new(vec![2, 3], vec![1.0, 2.0, 4.0, 8.0, 32.0, 64.0], true);
+        let b = Tensor::new(vec![], vec![2.0], true);
+        let expected_data = vec![0.5, 1.0, 2.0, 4.0, 16.0, 32.0];
+        let a_grad = Some(vec![0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+        let b_grad = Some(vec![-27.75]);
+        check_div(&a, &b, &expected_data, &a_grad, &b_grad);
+
+        a.zero_grad(); b.zero_grad();
+        let expected_data = vec![2.0, 1.0, 0.5, 0.25, 0.0625, 0.03125];
+        let a_grad = Some(vec![-2.0, -0.5, -0.125, -0.03125, -0.001953125, -0.00048828125]);
+        let b_grad = Some(vec![1.921875]);
+        check_div(&b, &a, &expected_data, &b_grad, &a_grad);
     }
     #[test]
     #[should_panic(expected = "")]
