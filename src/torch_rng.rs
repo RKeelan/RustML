@@ -13,9 +13,7 @@ const FLOAT_DIVISOR: f32 = 1.0f32 / (1 << 24) as f32;
 // seed compatible" with PyTorch. That is, using this library and PyTorch with the same seed should produce the same
 // results
 pub struct TorchRng {
-    seed: u64,
     left: i32,
-    seeded: bool,
     next: u32,
     state: [u32; MERSENNE_STATE_N as usize],
 }
@@ -23,9 +21,7 @@ pub struct TorchRng {
 impl TorchRng {
     pub fn new(seed: u64) -> Self {
         let mut rng = Self {
-            seed: seed,
             left: 1,
-            seeded: true,
             next: 0,
             state: [0; MERSENNE_STATE_N],
         };
