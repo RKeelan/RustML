@@ -5,6 +5,10 @@ import sys
 import numpy as np
 import torch
 
+def print_floats(floats):
+    strings = [f"{f:0.7f}" for f in floats]
+    return ", ".join(strings)
+
 
 def main(args):
     np.random.seed(2147483647)
@@ -13,11 +17,11 @@ def main(args):
     np_state = (3, tuple(np_state), None)
     random.setstate(np_state)
 
-    np_rand = ["{:0.4f}".format(np.random.rand()) for _ in range(5)]
-    print(f"Numpy:\t         {', '.join(np_rand)}")
+    np_rand = ["{:0.7f}".format(np.random.rand()) for _ in range(5)]
+    print(f"Numpy:   {', '.join(np_rand)}")
 
-    py_rand = ["{:0.4f}".format(random.random()) for _ in range(5)]
-    print(f"Python:\t         {', '.join(py_rand)}")
+    py_rand = ["{:0.7f}".format(random.random()) for _ in range(5)]
+    print(f"Python:  {', '.join(py_rand)}")
 
     generator = torch.Generator().manual_seed(2147483647)
     generator_state = generator.get_state()
@@ -43,7 +47,13 @@ def main(args):
     modified_generator_state = torch.ByteTensor(list(modified_byte_array))
     generator.set_state(modified_generator_state)
     torch_rand = torch.rand(5, generator=generator)
-    print(f"PyTorch: {torch_rand}")
+    print(f"PyTorch: {print_floats(list(torch_rand))}")
+    
+    generator = torch.Generator().manual_seed(2147483647)
+    #torch_rand = torch.rand(5, generator=generator)
+    torch_rand = torch.empty(5)
+    torch_rand.uniform_(0, 1, generator=generator)
+    print(f"PyTorch: {print_floats(list(torch_rand))}")
 
     return 0
 

@@ -1,27 +1,27 @@
-use ml::Tensor;
+use ml::torch_rng::TorchRng;
 use rand::Rng;
-use rand_mt::{Mt,Mt64};
+use rand_mt::Mt;
+
 
 // This binary used for exploratory testing
 fn main() {
     let seed = 2147483647;
+
+    let mut trng32 = TorchRng::new(seed as u64);
+    //let torch32: Vec<f32> = (0..5).map(|_| trng32.gen_range(0.0..1.0)).collect();
+    let torch32: Vec<f32> = (0..5).map(|_| trng32.torch_gen()).collect();
+    let t32_strings = torch32.iter().map(|x| format!("{:.7}", x)).collect::<Vec<String>>();
+    println!("Torch32: {}", t32_strings.join(", "));
+
     let mut rng32 = Mt::new(seed);
     let rand32: Vec<f32> = (0..5).map(|_| rng32.gen_range(0.0..1.0)).collect();
-    let r32_strings = rand32.iter().map(|x| format!("{:.4}", x)).collect::<Vec<String>>();
-    println!("Rust32:          {}", r32_strings.join(", "));
-    
-    let mut rng64 = Mt64::new(seed as u64);
-    let rand64: Vec<f32> = (0..5).map(|_| rng64.gen_range(0.0..1.0)).collect();
-    let r64_strings = rand64.iter().map(|x| format!("{:.4}", x)).collect::<Vec<String>>();
-    println!("Rust64:          {}", r64_strings.join(", "));
-    // I was able to get Numpy and Python to produce the same set of numbers. The 32-bit implementation of Mt for Rust
-    // appears to produce the same number as Python / Numpy for every other number. Rust64 and PyTorch are totally
-    // different.
+    let r32_strings = rand32.iter().map(|x| format!("{:.7}", x)).collect::<Vec<String>>();
+    println!("Rust32:  {}", r32_strings.join(", "));
     /*
-Numpy:           0.3934, 0.6567, 0.0863, 0.9644, 0.6211
-Python:          0.3934, 0.6567, 0.0863, 0.9644, 0.6211
-Rust32:          0.3934, 0.8920, 0.6567, 0.6391, 0.0863
-Rust64:          0.6839, 0.9944, 0.8243, 0.5297, 0.0530
-PyTorch: tensor([0.7081, 0.3542, 0.1054, 0.5996, 0.0904])
+Numpy:   0.3933911, 0.6566618, 0.0862908, 0.9643838, 0.6211251
+Python:  0.3933911, 0.6566618, 0.0862908, 0.9643838, 0.6211251
+PyTorch: 0.7081289, 0.3542391, 0.1054323, 0.5996444, 0.0904441
+Torch32: 0.7081289, 0.3542391, 0.1054323, 0.5996444, 0.0904441
+Rust32:  0.3933910, 0.8920087, 0.6566617, 0.6390611, 0.0862907
     */
 }
