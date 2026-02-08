@@ -1,5 +1,7 @@
 # RustML
 
+[![CI](https://github.com/RKeelan/RustML/actions/workflows/ci.yml/badge.svg)](https://github.com/RKeelan/RustML/actions/workflows/ci.yml)
+
 A native Rust, not-(yet?)-production grade implementation of PyTorch for following Andrej's Karpathy's "Neural Networks: Zero to Hero" tutorials in Rust.
 
 ## Features
